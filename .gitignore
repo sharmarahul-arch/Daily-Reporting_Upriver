@@ -1,0 +1,29 @@
+# --- Secrets / per-user config (NEVER commit) ---
+config/accounts.xlsx
+config/accounts.json
+config/credentials.json
+# Service account JSON, anywhere
+*service-account*.json
+*sheet-bridge*.json
+
+# --- Per-user state ---
+sessions/
+downloads/
+logs/
+
+# --- Python ---
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# --- OS / editor ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# --- Per-user tooling state ---
+.claude/
