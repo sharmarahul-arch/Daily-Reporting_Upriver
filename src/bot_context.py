@@ -11,9 +11,24 @@ from typing import Optional, Callable, Awaitable
 # Set by the bot before a run; cleared after
 _send_fn: Optional[Callable[[str], Awaitable[None]]] = None
 
-# asyncio.Queue for OTP codes: bot puts code here, _handle_otp reads it
-_otp_queue: "asyncio.Queue[str]" = asyncio.Queue()
+# asyncio.Queue for OTP codes: bot puts code here, _handle_otp reads it.
+#
+# IMPORTANT: do NOT create the Queue at import time. On Python 3.9 an
+# asyncio.Queue binds to the event loop that is current when it is first
+# awaited. telegram_bot.py creates a fresh loop inside app.run_polling(),
+# so an import-time queue ends up bound to the wrong loop and raises
+# "got Future attached to a different loop" when the user replies with the
+# code — silently breaking OTP delivery. We create it lazily instead, so it
+# binds to whichever loop request_otp/deliver_otp actually run in.
+_otp_queue: Optional["asyncio.Queue[str]"] = None
 _awaiting_otp: bool = False
+
+
+def _get_otp_queue() -> "asyncio.Queue[str]":
+    global _otp_queue
+    if _otp_queue is None:
+        _otp_queue = asyncio.Queue()
+    return _otp_queue
 
 
 def set_sender(fn: Optional[Callable[[str], Awaitable[None]]]):
@@ -42,6 +57,14 @@ async def request_otp(label: str) -> str:
     3 minutes for them to reply with the code. Returns "" on timeout.
     """
     global _awaiting_otp
+    queue = _get_otp_queue()
+    # Drain any stale code left over from a previous (timed-out) attempt so we
+    # never enter a fresh, valid code that was queued late.
+    while not queue.empty():
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
     _awaiting_otp = True
     await send(
         f"⚠️ *OTP / 2FA needed* for `{label}`\n\n"
@@ -49,7 +72,7 @@ async def request_otp(label: str) -> str:
         "*reply here with the 6-digit code*:"
     )
     try:
-        code = await asyncio.wait_for(_otp_queue.get(), timeout=180)
+        code = await asyncio.wait_for(queue.get(), timeout=180)
         return code.strip()
     except asyncio.TimeoutError:
         await send(f"⏱ OTP timed out for `{label}` — skipping this login.")
@@ -64,4 +87,4 @@ def is_awaiting_otp() -> bool:
 
 async def deliver_otp(code: str):
     """Called by the bot when the user replies with a code."""
-    await _otp_queue.put(code)
+    await _get_otp_queue().put(code)
