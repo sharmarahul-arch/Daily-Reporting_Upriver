@@ -209,14 +209,15 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
                     )
                     if mcid:
                         prev_owner = sc_seen_ids.get(mcid)
-                        if prev_owner and prev_owner != name:
+                        if prev_owner and prev_owner != name and mcid != "UNKNOWN":
                             log.error(
                                 "[%s] CONTAMINATION GUARD: SC mcid %s already belongs to '%s' — "
                                 "aborting Sales download for %s", name, mcid, prev_owner, name
                             )
                             account_summary.append(f"Sales: ❌ contamination guard (mcid matches {prev_owner})")
                         else:
-                            sc_seen_ids[mcid] = name
+                            if mcid != "UNKNOWN":
+                                sc_seen_ids[mcid] = name
                             sales_df = await download_sales_report(active_sc_page, name, marketplace=marketplace)
                             rows = upload_dataframe(sales_df, sheet_id, "sales")
                             if rows:
