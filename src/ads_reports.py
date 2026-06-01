@@ -38,11 +38,17 @@ async def _debug_screenshot(page: Page, label: str):
         pass
 
 
-async def _set_dashboard_date_yesterday(page: Page, account_name: str):
+async def _set_dashboard_date_yesterday(page: Page, account_name: str, target_date: "date" = None):
     """
-    Set the Campaign Manager dashboard date picker to Yesterday using the calendar UI.
-    Waits for the date button to appear before clicking (fixes race condition on slow pages).
+    Set the Campaign Manager dashboard date picker.
+
+    If target_date is yesterday (or None) the fast 'Yesterday' preset is used.
+    Otherwise the preset is skipped and the calendar/date-input path selects the
+    specific target_date (start == end == that day).
     """
+    from src.utils import is_yesterday, resolve_report_date
+    target_date = resolve_report_date(target_date)
+    use_preset = is_yesterday(target_date)
     try:
         await page.wait_for_timeout(800)
 
@@ -130,40 +136,44 @@ async def _set_dashboard_date_yesterday(page: Page, account_name: str):
         log.info("[%s] Opened dashboard date picker (was: '%s')", account_name, opened)
         await page.wait_for_timeout(1500)  # wait for picker panel to animate open
 
-        # ── Step 3: Click "Yesterday" preset ────────────────────────────────────
-        # Try Playwright locator first (handles visibility correctly)
+        # ── Step 3: Click "Yesterday" preset (only when target IS yesterday) ────
         picked = False
-        for yesterday_selector in [
-            'text="Yesterday"',
-            '[data-value="yesterday"], [data-preset="yesterday"]',
-            'button:has-text("Yesterday"), li:has-text("Yesterday"), span:has-text("Yesterday")',
-        ]:
-            try:
-                yest_loc = page.locator(yesterday_selector).first
-                await yest_loc.wait_for(state="visible", timeout=2000)
-                await yest_loc.click()
-                picked = True
-                break
-            except Exception:
-                continue
+        if use_preset:
+            # Try Playwright locator first (handles visibility correctly)
+            for yesterday_selector in [
+                'text="Yesterday"',
+                '[data-value="yesterday"], [data-preset="yesterday"]',
+                'button:has-text("Yesterday"), li:has-text("Yesterday"), span:has-text("Yesterday")',
+            ]:
+                try:
+                    yest_loc = page.locator(yesterday_selector).first
+                    await yest_loc.wait_for(state="visible", timeout=2000)
+                    await yest_loc.click()
+                    picked = True
+                    break
+                except Exception:
+                    continue
 
-        if not picked:
-            # JS fallback
-            picked = await page.evaluate("""
-                () => {
-                    const isVis = el => {
-                        const r = el.getBoundingClientRect();
-                        return r.width > 0 && r.height > 0 && el.offsetParent !== null;
-                    };
-                    const all = Array.from(document.querySelectorAll('*'));
-                    const el = all.find(e => {
-                        const t = (e.textContent || '').trim().toLowerCase();
-                        return t === 'yesterday' && isVis(e);
-                    });
-                    if (el) { el.scrollIntoView({block: 'center'}); el.click(); return true; }
-                    return false;
-                }
-            """)
+            if not picked:
+                # JS fallback
+                picked = await page.evaluate("""
+                    () => {
+                        const isVis = el => {
+                            const r = el.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0 && el.offsetParent !== null;
+                        };
+                        const all = Array.from(document.querySelectorAll('*'));
+                        const el = all.find(e => {
+                            const t = (e.textContent || '').trim().toLowerCase();
+                            return t === 'yesterday' && isVis(e);
+                        });
+                        if (el) { el.scrollIntoView({block: 'center'}); el.click(); return true; }
+                        return false;
+                    }
+                """)
+        else:
+            log.info("[%s] Custom date %s — skipping 'Yesterday' preset, using calendar",
+                     account_name, target_date.isoformat())
 
         if picked:
             log.info("[%s] Clicked 'Yesterday' preset button", account_name)
@@ -172,17 +182,19 @@ async def _set_dashboard_date_yesterday(page: Page, account_name: str):
             # Handles two cases:
             #   A) Flat dropdown with options (Yesterday / Last 7 days / Lifetime / etc.)
             #   B) Calendar picker stuck on a past month — navigate forward to target month
-            log.warning("[%s] 'Yesterday' preset not found — trying dropdown/calendar fallback", account_name)
+            log.warning("[%s] Using dropdown/calendar path for %s", account_name, target_date.isoformat())
             await _debug_screenshot(page, f"{account_name}_datepicker_open")
 
-            yest = date.today() - timedelta(days=1)
+            yest = target_date
             yest_day   = str(yest.day)        # "25"
             yest_month = yest.strftime("%B")  # "May"
             yest_year  = str(yest.year)       # "2026"
             yest_label = f"{yest_month} {yest_day}, {yest_year}"
 
-            # Sub-strategy A: dropdown list — click "Yesterday" from a visible option list
-            picked = await page.evaluate("""
+            # Sub-strategy A: dropdown list — click "Yesterday" from a visible option
+            # list. ONLY valid when the target actually is yesterday; for a custom
+            # date this would pick the wrong day, so skip straight to B/C.
+            picked = use_preset and await page.evaluate("""
                 () => {
                     const isVis = el => {
                         const r = el.getBoundingClientRect();
@@ -996,11 +1008,15 @@ async def _handle_choose_account_page(page: Page, account_name: str, marketplace
         log.warning("[%s] Could not find marketplace '%s' on choose-account page", account_name, marketplace)
 
 
-async def download_campaign_report(page: Page, account: dict, account_name: str) -> Optional[pd.DataFrame]:
+async def download_campaign_report(page: Page, account: dict, account_name: str,
+                                   target_date: "date" = None) -> Optional[pd.DataFrame]:
     """
-    Campaigns tab → navigate to entityId URL → set date to Yesterday → Export → Download.
+    Campaigns tab → navigate to entityId URL → set date → Export → Download.
+    target_date defaults to yesterday when None.
     """
-    log.info("[%s] Fetching Campaign Performance report...", account_name)
+    from src.utils import resolve_report_date
+    report_date = resolve_report_date(target_date)
+    log.info("[%s] Fetching Campaign Performance report for %s...", account_name, report_date.isoformat())
     try:
         marketplace = account.get("marketplace", "IN")
         base_url, campaign_manager_url = _ads_urls(account)
@@ -1031,8 +1047,8 @@ async def download_campaign_report(page: Page, account: dict, account_name: str)
 
         await _debug_screenshot(page, f"{account_name}_campaign_dashboard")
 
-        # ── Set date to Yesterday ─────────────────────────────────────────────────
-        await _set_dashboard_date_yesterday(page, account_name)
+        # ── Set the report date ───────────────────────────────────────────────────
+        await _set_dashboard_date_yesterday(page, account_name, report_date)
         await _debug_screenshot(page, f"{account_name}_campaign_after_date")
 
         # ── Sort by Spends and set max results per page ───────────────────────────
@@ -1044,7 +1060,7 @@ async def download_campaign_report(page: Page, account: dict, account_name: str)
         if all_dfs:
             combined = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
             combined.insert(0, "Account", account_name)
-            combined.insert(1, "Report Date", yesterday())
+            combined.insert(1, "Report Date", report_date.isoformat())
             log.info("[%s] Campaign rows (all pages): %d", account_name, len(combined))
             return combined
 
@@ -1058,11 +1074,15 @@ async def download_campaign_report(page: Page, account: dict, account_name: str)
 
 # ── Advertised Products Report ──────────────────────────────────────────────────
 
-async def download_advertised_products_report(page: Page, account: dict, account_name: str) -> Optional[pd.DataFrame]:
+async def download_advertised_products_report(page: Page, account: dict, account_name: str,
+                                              target_date: "date" = None) -> Optional[pd.DataFrame]:
     """
-    Products tab → set date to Yesterday → go to last page → Export → Download.
+    Products tab → set date → go to last page → Export → Download.
+    target_date defaults to yesterday when None.
     """
-    log.info("[%s] Fetching Advertised Products report...", account_name)
+    from src.utils import resolve_report_date
+    report_date = resolve_report_date(target_date)
+    log.info("[%s] Fetching Advertised Products report for %s...", account_name, report_date.isoformat())
     try:
         marketplace = account.get("marketplace", "IN")
         base_url, campaign_manager_url = _ads_urls(account)
@@ -1150,8 +1170,8 @@ async def download_advertised_products_report(page: Page, account: dict, account
             log.info("[%s] Cleared %d active search filter(s) on Products page", account_name, cleared_filter)
             await page.wait_for_timeout(2000)  # wait for table to re-render with all products
 
-        # Set date to Yesterday
-        await _set_dashboard_date_yesterday(page, account_name)
+        # Set the report date
+        await _set_dashboard_date_yesterday(page, account_name, report_date)
         await _debug_screenshot(page, f"{account_name}_products_after_date")
 
         # Sort by Spends (highest to lowest)
@@ -1167,7 +1187,7 @@ async def download_advertised_products_report(page: Page, account: dict, account
         if all_dfs:
             combined = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
             combined.insert(0, "Account", account_name)
-            combined.insert(1, "Report Date", yesterday())
+            combined.insert(1, "Report Date", report_date.isoformat())
             log.info("[%s] Advertised Products rows (all pages): %d", account_name, len(combined))
             return combined
 

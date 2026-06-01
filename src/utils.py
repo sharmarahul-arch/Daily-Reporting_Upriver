@@ -18,6 +18,22 @@ def today_str() -> str:
     return date.today().strftime("%Y-%m-%d")
 
 
+def parse_date_arg(s: str) -> date:
+    """Parse a YYYY-MM-DD string into a date (used by the --date CLI flag)."""
+    from datetime import datetime
+    return datetime.strptime(s.strip(), "%Y-%m-%d").date()
+
+
+def resolve_report_date(target_date: Optional[date] = None) -> date:
+    """Return the target report date, defaulting to yesterday when unset."""
+    return target_date if target_date is not None else (date.today() - timedelta(days=1))
+
+
+def is_yesterday(d: date) -> bool:
+    """True when d is exactly yesterday (lets callers use the fast 'Yesterday' preset)."""
+    return d == (date.today() - timedelta(days=1))
+
+
 def setup_logging():
     from src.config import LOGS_DIR
     LOGS_DIR.mkdir(exist_ok=True)

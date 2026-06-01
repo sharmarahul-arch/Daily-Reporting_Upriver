@@ -37,7 +37,8 @@ import src.bot_context as bot_ctx
 log = logging.getLogger(__name__)
 
 
-async def run(filter_account: Optional[str] = None, headless: bool = False, sc_only: bool = False, ads_only: bool = False):
+async def run(filter_account: Optional[str] = None, headless: bool = False, sc_only: bool = False,
+              ads_only: bool = False, target_date=None):
     accounts = load_accounts()
     if filter_account:
         accounts = [a for a in accounts if a["name"].lower() == filter_account.lower()]
@@ -218,7 +219,7 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
                         else:
                             if mcid != "UNKNOWN":
                                 sc_seen_ids[mcid] = name
-                            sales_df = await download_sales_report(active_sc_page, name, marketplace=marketplace)
+                            sales_df = await download_sales_report(active_sc_page, name, marketplace=marketplace, target_date=target_date)
                             rows = upload_dataframe(sales_df, sheet_id, "sales")
                             if rows:
                                 account_summary.append(f"Sales: {rows} rows")
@@ -254,12 +255,12 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
                             if entity_id != "UNKNOWN":
                                 ads_seen_ids[entity_id] = name
 
-                            campaign_df = await download_campaign_report(active_ads_page, account, name)
+                            campaign_df = await download_campaign_report(active_ads_page, account, name, target_date=target_date)
                             rows = upload_dataframe(campaign_df, sheet_id, "campaigns")
                             if rows:
                                 account_summary.append(f"Campaigns: {rows} rows")
 
-                            products_df = await download_advertised_products_report(active_ads_page, account, name)
+                            products_df = await download_advertised_products_report(active_ads_page, account, name, target_date=target_date)
                             rows = upload_dataframe(products_df, sheet_id, "advertised_products")
                             if rows:
                                 account_summary.append(f"Products: {rows} rows")
@@ -303,7 +304,21 @@ def main():
                         help="Interactive: capture SC mcid/mkid/paid IDs for each account into accounts.xlsx")
     parser.add_argument("--recapture-ids", action="store_true",
                         help="Same as --capture-ids but re-captures ALL accounts (overwriting existing IDs)")
+    parser.add_argument("--date", help="Pull a specific day (YYYY-MM-DD) instead of yesterday")
     args = parser.parse_args()
+
+    target_date = None
+    if args.date:
+        from src.utils import parse_date_arg
+        from datetime import date as _date
+        try:
+            target_date = parse_date_arg(args.date)
+        except ValueError:
+            print(f"❌ Invalid --date '{args.date}'. Use YYYY-MM-DD.")
+            return
+        if target_date >= _date.today():
+            print(f"❌ --date {target_date} is not in the past. Amazon only has complete data for past days.")
+            return
 
     if args.clear_sessions:
         for f in SESSIONS_DIR.glob("*.json"):
@@ -324,6 +339,7 @@ def main():
         filter_account=args.account,
         sc_only=args.sc_only,
         ads_only=args.ads_only,
+        target_date=target_date,
     ))
 
 
