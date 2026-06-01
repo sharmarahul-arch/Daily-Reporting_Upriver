@@ -23,7 +23,7 @@ from src.config import (
     ADS_CAMPAIGN_MANAGER, ADS_CAMPAIGN_MANAGER_US,
     SC_BASE_URL, SC_BASE_URL_US,
 )
-from src.utils import setup_logging, yesterday, clean_downloads
+from src.utils import setup_logging, yesterday, clean_downloads, resolve_report_date
 from src.auth import (
     restore_session, save_session, clear_session,
     login_seller_central, login_ads,
@@ -191,7 +191,7 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
             active_cm_url         = ADS_CAMPAIGN_MANAGER_US if is_us else ADS_CAMPAIGN_MANAGER
 
             log.info("=" * 60)
-            log.info("Processing: %s  (date: %s)", name, yesterday())
+            log.info("Processing: %s  (date: %s)", name, resolve_report_date(target_date).isoformat())
             log.info("=" * 60)
             await bot_ctx.send(f"📍 *{name}* — starting...")
 
