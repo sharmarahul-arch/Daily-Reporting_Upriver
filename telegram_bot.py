@@ -21,9 +21,21 @@ import asyncio
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from pathlib import Path
 from typing import Optional
+
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST = None
+
+# Daily scheduled runs handled inside the bot process (so OTP can still be
+# requested over Telegram). Each entry: (HH, MM, account_filter, sc_only, ads_only).
+SCHEDULED_RUNS = [
+    (13, 30, "Charlotte Home", False, False),   # US account — 13:30 IST
+]
 
 from telegram import Update
 from telegram.ext import (
@@ -174,9 +186,31 @@ async def _do_run(bot, account_filter: Optional[str], sc_only: bool = False, ads
         bot_ctx.set_sender(None)
 
 
+# ── Shared run trigger (used by /run AND the internal scheduler) ────────────────
+def _start_run(bot, account_filter: Optional[str], sc_only: bool = False, ads_only: bool = False) -> bool:
+    """
+    Wire up the Telegram sender and launch a background report run.
+    Returns False if a run is already in progress (caller should report that).
+    """
+    global _run_task, _run_start
+    if _run_task and not _run_task.done():
+        return False
+
+    async def send_to_chat(text: str):
+        try:
+            await bot.send_message(chat_id=ALLOWED_CHAT_ID, text=text, parse_mode="Markdown")
+        except Exception:
+            pass
+
+    bot_ctx.set_sender(send_to_chat)
+    _run_start = datetime.now()
+    # Run in background so the bot stays responsive for OTP replies
+    _run_task = asyncio.create_task(_do_run(bot, account_filter, sc_only=sc_only, ads_only=ads_only))
+    return True
+
+
 # ── /run ──────────────────────────────────────────────────────────────────────
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global _run_task, _run_start
     if not _allowed(update):
         return
 
@@ -217,22 +251,26 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
-    # Wire up Telegram sender so the script can post progress
-    async def send_to_chat(text: str):
-        try:
-            await context.bot.send_message(
-                chat_id=ALLOWED_CHAT_ID,
-                text=text,
-                parse_mode="Markdown",
-            )
-        except Exception:
-            pass
+    _start_run(context.bot, account_filter, sc_only=sc_only, ads_only=ads_only)
 
-    bot_ctx.set_sender(send_to_chat)
-    _run_start = datetime.now()
 
-    # Run in background so the bot stays responsive for OTP replies
-    _run_task = asyncio.create_task(_do_run(context.bot, account_filter, sc_only=sc_only, ads_only=ads_only))
+# ── Scheduled run (fired by the bot's internal job queue) ───────────────────────
+async def scheduled_run(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    account_filter, sc_only, ads_only = job.data
+    label = account_filter or "all accounts"
+    if not _start_run(context.bot, account_filter, sc_only=sc_only, ads_only=ads_only):
+        await context.bot.send_message(
+            chat_id=ALLOWED_CHAT_ID,
+            text=f"⏰ Scheduled run for *{label}* skipped — another run is already in progress.",
+            parse_mode="Markdown",
+        )
+        return
+    await context.bot.send_message(
+        chat_id=ALLOWED_CHAT_ID,
+        text=f"⏰ *Scheduled run started:* {label}\nI'll send progress here. If OTP is needed I'll ask.",
+        parse_mode="Markdown",
+    )
 
 
 # ── OTP / plain message handler ────────────────────────────────────────────────
@@ -275,8 +313,27 @@ def main():
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # ── Register internal daily schedules ───────────────────────────────────────
+    # Runs fire inside the bot process so OTP can still be requested via Telegram.
+    if app.job_queue is None:
+        log.warning("JobQueue unavailable — scheduled runs disabled. "
+                    "Install with: pip install 'python-telegram-bot[job-queue]'")
+    else:
+        for hh, mm, acct, sc_only, ads_only in SCHEDULED_RUNS:
+            run_at = dt_time(hour=hh, minute=mm, tzinfo=IST) if IST else dt_time(hour=hh, minute=mm)
+            app.job_queue.run_daily(
+                scheduled_run,
+                time=run_at,
+                data=(acct, sc_only, ads_only),
+                name=f"scheduled_{(acct or 'all').replace(' ', '_')}",
+            )
+            log.info("Scheduled daily run: %s at %02d:%02d %s",
+                     acct or "all accounts", hh, mm, "IST" if IST else "local")
+
     print("✅ Bot is running. Send /run in Telegram to start a report.")
     print(f"   Chat ID: {ALLOWED_CHAT_ID}")
+    for hh, mm, acct, _, _ in SCHEDULED_RUNS:
+        print(f"   ⏰ Scheduled: {acct or 'all accounts'} daily at {hh:02d}:{mm:02d} IST")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
