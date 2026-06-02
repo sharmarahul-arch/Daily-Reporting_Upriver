@@ -250,143 +250,198 @@ async def _set_dashboard_date_yesterday(page: Page, account_name: str, target_da
                     picked = True
                     await page.wait_for_timeout(800)
 
-            # Sub-strategy C: calendar cell click — navigate to the correct month first
+            # Sub-strategy C: calendar cell click
+            # Navigate backward OR forward to the target month, then click the day
+            # as the range start and again as the range end (same-day single-day range).
+            # Apply is scoped to the picker panel to avoid hitting unrelated Apply buttons.
             if not picked:
-                # Navigate forward through calendar months until we reach the target month/year
+                from datetime import date as _date
+                target_year  = int(yest_year)
+                target_month_num = yest.month
+
                 log.info("[%s] Navigating calendar to %s %s", account_name, yest_month, yest_year)
-                for nav_attempt in range(24):  # up to 24 months forward
-                    cal_header = await page.evaluate("""
+                for nav_attempt in range(24):
+                    # Read the FIRST calendar header visible (left calendar in a dual-month picker)
+                    cal_info = await page.evaluate("""
                         () => {
                             const isVis = el => {
                                 const r = el.getBoundingClientRect();
                                 return r.width > 0 && r.height > 0;
                             };
-                            // Calendar header: element with text like "September 2025" or "May 2026"
-                            const all = Array.from(document.querySelectorAll('*'));
-                            for (const el of all) {
+                            const headers = [];
+                            for (const el of Array.from(document.querySelectorAll('*'))) {
                                 const t = (el.textContent || el.innerText || '').trim();
-                                if (/^[A-Za-z]+ \\d{4}$/.test(t) && isVis(el)) return t;
+                                if (/^[A-Za-z]+ \\d{4}$/.test(t) && isVis(el)) headers.push(t);
+                                if (headers.length >= 2) break;
                             }
-                            return null;
+                            return headers;
                         }
                     """)
-                    if cal_header:
-                        log.info("[%s] Calendar shows: '%s'", account_name, cal_header)
-                        if yest_month.lower() in cal_header.lower() and yest_year in cal_header:
-                            break  # on the right month
-                    # Click Next month arrow
-                    navigated = await page.evaluate("""
-                        () => {
-                            const isVis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-                            const btns = Array.from(document.querySelectorAll('button, [role="button"], a'));
-                            const next = btns.find(b => {
-                                if (!isVis(b)) return false;
-                                const lbl = (b.getAttribute('aria-label') || '').toLowerCase();
-                                const txt = (b.textContent || b.innerText || '').trim();
-                                return lbl.includes('next') || lbl.includes('forward') ||
-                                       txt === '>' || txt === '›' || txt === '→' || txt === '▶';
-                            });
-                            if (next) { next.click(); return true; }
-                            return false;
-                        }
-                    """)
-                    if not navigated:
-                        log.warning("[%s] Could not find Next month button in calendar", account_name)
-                        break
-                    await page.wait_for_timeout(400)
+                    if cal_info:
+                        log.info("[%s] Calendar headers: %s", account_name, cal_info)
+                        # Check if target month/year is already visible
+                        if any(yest_month.lower() in h.lower() and yest_year in h for h in cal_info):
+                            break
 
-                # Now click the target day cell
-                clicked_cell = await page.evaluate(f"""
+                        # Determine direction: parse first visible header month
+                        import re as _re
+                        m = _re.match(r'(\w+)\s+(\d{4})', cal_info[0])
+                        if m:
+                            import calendar as _cal
+                            try:
+                                shown_month = list(_cal.month_name).index(m.group(1).capitalize())
+                                shown_year  = int(m.group(2))
+                                shown_total = shown_year * 12 + shown_month
+                                target_total = target_year * 12 + target_month_num
+                                go_forward = target_total > shown_total
+                            except Exception:
+                                go_forward = True
+                        else:
+                            go_forward = True
+
+                        direction = 'next' if go_forward else 'prev'
+                        navigated = await page.evaluate(f"""
+                            () => {{
+                                const isVis = el => {{ const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }};
+                                const btns = Array.from(document.querySelectorAll('button, [role="button"], a'));
+                                const btn = btns.find(b => {{
+                                    if (!isVis(b)) return false;
+                                    const lbl = (b.getAttribute('aria-label') || '').toLowerCase();
+                                    const txt = (b.textContent || b.innerText || '').trim();
+                                    if ('{direction}' === 'next')
+                                        return lbl.includes('next') || lbl.includes('forward') ||
+                                               txt === '>' || txt === '›' || txt === '→' || txt === '▶';
+                                    else
+                                        return lbl.includes('prev') || lbl.includes('back') ||
+                                               txt === '<' || txt === '‹' || txt === '←' || txt === '◀';
+                                }});
+                                if (btn) {{ btn.scrollIntoView({{block:'center'}}); btn.click(); return true; }}
+                                return false;
+                            }}
+                        """)
+                        if not navigated:
+                            log.warning("[%s] Could not navigate calendar (%s)", account_name, direction)
+                            break
+                        await page.wait_for_timeout(400)
+
+                # Click the target day cell (start of range)
+                cell_bbox = await page.evaluate(f"""
                     () => {{
                         const day   = '{yest_day}';
                         const month = '{yest_month}'.toLowerCase();
                         const year  = '{yest_year}';
-                        const isVis = el => {{
-                            const r = el.getBoundingClientRect();
-                            return r.width > 0 && r.height > 0;
-                        }};
+                        const isVis = el => {{ const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }};
                         const cells = Array.from(document.querySelectorAll(
                             'td, button, [role="gridcell"], [class*="Day"], [class*="day-cell"]'
                         )).filter(el => {{
-                            if (!isVis(el)) return false;
-                            if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+                            if (!isVis(el) || el.disabled || el.getAttribute('aria-disabled')==='true') return false;
                             const label = (el.getAttribute('aria-label') || '').toLowerCase();
                             const txt   = (el.textContent || el.innerText || '').trim();
-                            return (
-                                (label.includes(month) && label.includes(day) && label.includes(year)) ||
-                                (txt === day && (() => {{
-                                    let p = el.parentElement; let d = 0;
-                                    while (p && d < 8) {{
-                                        const c = (p.className || '').toLowerCase();
-                                        if (c.includes('calendar') || c.includes('datepick') ||
-                                            p.tagName === 'TABLE' || p.getAttribute('role') === 'grid')
-                                            return true;
-                                        p = p.parentElement; d++;
-                                    }}
-                                    return false;
-                                }})())
-                            );
+                            return (label.includes(month) && label.includes(day) && label.includes(year)) ||
+                                   (txt === day && (() => {{
+                                       let p = el.parentElement; let d = 0;
+                                       while (p && d < 8) {{
+                                           const c = (p.className || '').toLowerCase();
+                                           if (c.includes('calendar') || c.includes('datepick') ||
+                                               p.tagName === 'TABLE' || p.getAttribute('role') === 'grid')
+                                               return true;
+                                           p = p.parentElement; d++;
+                                       }}
+                                       return false;
+                                   }})());
                         }});
                         if (!cells.length) return null;
-                        cells[0].scrollIntoView({{block: 'center'}});
-                        cells[0].click();
-                        return (cells[0].getAttribute('aria-label') || cells[0].textContent || '').trim().slice(0, 40);
+                        cells[0].scrollIntoView({{block:'center'}});
+                        const r = cells[0].getBoundingClientRect();
+                        return {{
+                            x: r.left + r.width / 2,
+                            y: r.top  + r.height / 2,
+                            label: (cells[0].getAttribute('aria-label') || cells[0].textContent || '').trim().slice(0, 50),
+                        }};
                     }}
                 """)
 
-                if clicked_cell:
-                    log.info("[%s] Clicked calendar cell '%s' for yesterday", account_name, clicked_cell)
-                    await page.wait_for_timeout(500)
-                    # Click again for range pickers (start + end = same day)
-                    await page.evaluate(f"""
+                if cell_bbox:
+                    log.info("[%s] Clicking calendar cell '%s' at (%.0f, %.0f) — start",
+                             account_name, cell_bbox['label'], cell_bbox['x'], cell_bbox['y'])
+                    # Click #1: set range start
+                    await page.mouse.click(cell_bbox['x'], cell_bbox['y'])
+                    await page.wait_for_timeout(700)
+
+                    # Click #2: set range end (same day) — RE-QUERY the cell because
+                    # after the first click the picker updates DOM/aria-labels and the
+                    # cell may have shifted slightly; using the stale coordinate risks
+                    # missing it or clicking an adjacent cell in the updated layout.
+                    cell_bbox2 = await page.evaluate(f"""
                         () => {{
-                            const day = '{yest_day}'; const month = '{yest_month}'.toLowerCase(); const year = '{yest_year}';
+                            const day   = '{yest_day}';
+                            const month = '{yest_month}'.toLowerCase();
+                            const year  = '{yest_year}';
                             const isVis = el => {{ const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }};
+                            // After the first click the aria-label changes to "selected as start date"
+                            // so we match on month+day+year OR text === day inside a calendar grid
                             const cells = Array.from(document.querySelectorAll(
                                 'td, button, [role="gridcell"], [class*="Day"], [class*="day-cell"]'
                             )).filter(el => {{
-                                if (!isVis(el) || el.disabled) return false;
+                                if (!isVis(el) || el.disabled || el.getAttribute('aria-disabled')==='true') return false;
                                 const label = (el.getAttribute('aria-label') || '').toLowerCase();
-                                const txt = (el.textContent || '').trim();
-                                return (label.includes(month) && label.includes(day) && label.includes(year)) || txt === day;
+                                const txt   = (el.textContent || el.innerText || '').trim();
+                                return (label.includes(month) && label.includes(day) && label.includes(year)) ||
+                                       (txt === day && (() => {{
+                                           let p = el.parentElement; let d = 0;
+                                           while (p && d < 8) {{
+                                               const c = (p.className || '').toLowerCase();
+                                               if (c.includes('calendar') || c.includes('datepick') ||
+                                                   p.tagName === 'TABLE' || p.getAttribute('role') === 'grid')
+                                                   return true;
+                                               p = p.parentElement; d++;
+                                           }}
+                                           return false;
+                                       }})());
                             }});
-                            if (cells.length) cells[0].click();
+                            if (!cells.length) return null;
+                            const r = cells[0].getBoundingClientRect();
+                            return {{
+                                x: r.left + r.width / 2,
+                                y: r.top  + r.height / 2,
+                                label: (cells[0].getAttribute('aria-label') || cells[0].textContent || '').trim().slice(0, 60),
+                            }};
                         }}
                     """)
+                    if cell_bbox2:
+                        log.info("[%s] Re-clicking cell '%s' at (%.0f, %.0f) — end",
+                                 account_name, cell_bbox2['label'], cell_bbox2['x'], cell_bbox2['y'])
+                        await page.mouse.click(cell_bbox2['x'], cell_bbox2['y'])
+                        await page.wait_for_timeout(600)
+                    else:
+                        log.warning("[%s] Could not re-find cell for end-date click", account_name)
                     picked = True
                 else:
-                    log.warning("[%s] Could not find calendar cell for '%s %s'", account_name, yest_month, yest_day)
+                    log.warning("[%s] Could not find calendar cell for %s %s", account_name, yest_month, yest_day)
 
-        await page.wait_for_timeout(800)
+        await page.wait_for_timeout(1000)
 
-        # ── Step 4: Click Apply / Update / Done ─────────────────────────────────
+        # ── Step 4: Click Apply — scoped to the calendar container ───────────────
+        # Look for an Apply button that is INSIDE the same floating panel as the
+        # visible calendar cells (identified by role="gridcell" proximity).
+        # We avoid hitting unrelated Apply buttons (search/filter) this way.
+        url_before = page.url
         applied = None
-        for apply_sel in ['button:has-text("Apply")', 'button:has-text("Update")', 'button:has-text("Done")']:
-            try:
-                apply_loc = page.locator(apply_sel).first
-                await apply_loc.wait_for(state="visible", timeout=2000)
-                text = await apply_loc.inner_text()
-                await apply_loc.click()
-                applied = text.strip()
-                break
-            except Exception:
-                continue
-
-        if not applied:
-            # JS fallback
-            applied = await page.evaluate("""
-                () => {
-                    const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-                    const applyBtn = btns.find(e => {
-                        const t = (e.textContent || '').trim().toLowerCase();
-                        return ['apply', 'update', 'done', 'save', 'ok'].includes(t) &&
-                               e.getBoundingClientRect().width > 0;
-                    });
-                    if (applyBtn) { applyBtn.scrollIntoView({block: 'center'}); applyBtn.click();
-                        return (applyBtn.textContent || '').trim(); }
-                    return null;
-                }
-            """)
+        try:
+            apply_loc = page.locator('button:has-text("Apply")').first
+            await apply_loc.wait_for(state="visible", timeout=3000)
+            applied = (await apply_loc.inner_text()).strip()
+            await apply_loc.click()
+            await page.wait_for_timeout(1500)
+            # Safety guard: if Apply navigated away from Ads, go back
+            if "advertising.amazon" not in page.url:
+                log.warning("[%s] Apply navigated away from Ads — recovering to %s",
+                            account_name, url_before)
+                await page.goto(url_before, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_load_state("networkidle", timeout=15000)
+                applied = None  # treat as not applied
+        except Exception as _ae:
+            log.warning("[%s] Apply button not found or click failed: %s", account_name, _ae)
 
         if applied:
             log.info("[%s] Applied date picker ('%s')", account_name, applied)
@@ -394,6 +449,33 @@ async def _set_dashboard_date_yesterday(page: Page, account_name: str, target_da
         else:
             log.info("[%s] No Apply button found — date may auto-apply", account_name)
             await page.wait_for_timeout(1500)
+
+        # ── Readback: what range does the date button show now? ─────────────────
+        # Find the date button in the same toolbar as Export and read its label,
+        # so we can confirm the export will reflect the intended single day.
+        readback = await page.evaluate("""
+            () => {
+                const isVis = el => {
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width>0 && r.height>0 && s.visibility!=='hidden' && s.display!=='none';
+                };
+                const exportBtn = Array.from(document.querySelectorAll('button,[role="button"],a'))
+                    .find(e => isVis(e) && (e.innerText||'').trim().toLowerCase()==='export');
+                const isDateTxt = t => /20\\d{2}/.test(t) && /[A-Za-z]/.test(t) && t.length<60;
+                if (exportBtn) {
+                    let c = exportBtn.parentElement;
+                    for (let d=0; d<8 && c; d++) {
+                        const b = Array.from(c.querySelectorAll('button,[role="button"]'))
+                            .find(x => isVis(x) && x!==exportBtn && isDateTxt((x.innerText||'').trim()));
+                        if (b) return (b.innerText||'').trim().slice(0,60);
+                        c = c.parentElement;
+                    }
+                }
+                return null;
+            }
+        """)
+        log.info("[%s] ADS DATE READBACK (table picker now shows): %s", account_name, readback)
 
     except Exception as exc:
         log.warning("[%s] Could not set dashboard date: %s", account_name, exc)
