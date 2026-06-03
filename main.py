@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 
 
 async def run(filter_account: Optional[str] = None, headless: bool = False, sc_only: bool = False,
-              ads_only: bool = False, target_date=None):
+              ads_only: bool = False, target_date=None, exclude_accounts=None):
     accounts = load_accounts()
     if filter_account:
         accounts = [a for a in accounts if a["name"].lower() == filter_account.lower()]
@@ -46,6 +46,11 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
             log.error("Account '%s' not found in config", filter_account)
             await bot_ctx.send(f"❌ Account `{filter_account}` not found in config.")
             return
+    if exclude_accounts:
+        excl = {e.strip().lower() for e in exclude_accounts}
+        before = len(accounts)
+        accounts = [a for a in accounts if a["name"].lower() not in excl]
+        log.info("Excluded %d account(s): %s", before - len(accounts), ", ".join(sorted(excl)))
 
     email    = AMAZON_EMAIL
     password = AMAZON_PASSWORD
@@ -305,6 +310,7 @@ def main():
     parser.add_argument("--recapture-ids", action="store_true",
                         help="Same as --capture-ids but re-captures ALL accounts (overwriting existing IDs)")
     parser.add_argument("--date", help="Pull a specific day (YYYY-MM-DD) instead of yesterday")
+    parser.add_argument("--exclude", help="Comma-separated account names to skip (e.g. \"Charlotte Home\")")
     args = parser.parse_args()
 
     target_date = None
@@ -335,11 +341,14 @@ def main():
         asyncio.run(capture_all_ids(force=args.recapture_ids))
         return
 
+    exclude_accounts = [e for e in (args.exclude or "").split(",") if e.strip()] or None
+
     asyncio.run(run(
         filter_account=args.account,
         sc_only=args.sc_only,
         ads_only=args.ads_only,
         target_date=target_date,
+        exclude_accounts=exclude_accounts,
     ))
 
 
