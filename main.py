@@ -16,6 +16,14 @@ import logging
 import sys
 from typing import Optional
 
+# ── --doctor short-circuit ───────────────────────────────────────────────────
+# Run the setup health check BEFORE importing config/playwright, so it works
+# even when the setup is incomplete (missing credentials, deps, etc.) — which
+# is exactly when someone runs --doctor.
+if "--doctor" in sys.argv:
+    from src.doctor import run_doctor
+    raise SystemExit(run_doctor())
+
 from playwright.async_api import async_playwright
 
 from src.config import (

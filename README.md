@@ -157,15 +157,22 @@ Use `nohup` / `screen` / `tmux` to keep it running.
 ## CLI reference
 
 ```bash
-python main.py                           # run all active accounts (SC + Ads)
+python main.py                           # run all active accounts (SC + Ads), yesterday
 python main.py --account "Name"          # run one account only
+python main.py --exclude "Charlotte Home"  # run all EXCEPT these (comma-separated)
+python main.py --date 2026-05-30         # pull a specific past day instead of yesterday
 python main.py --sc-only                 # Seller Central reports only
 python main.py --ads-only                # Ads reports only
 python main.py --clear-sessions          # forget saved logins (forces fresh OTP)
 python main.py --test-sheets SHEET_ID    # verify Google Sheets connection
 python main.py --capture-ids             # interactive: capture SC IDs for accounts that don't have them
 python main.py --recapture-ids           # force re-capture for ALL accounts
+python main.py --doctor                  # check your setup and report exactly what's missing
 ```
+
+**New here? Run `python main.py --doctor` first** — it verifies dependencies,
+credentials, Google access, each account's sheet, and ID-capture status, and
+tells you precisely what to fix before your first run.
 
 ---
 
