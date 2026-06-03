@@ -157,6 +157,22 @@ that the login is saved and future runs are silent.
 
 ---
 
+## Getting updates later
+
+When the tool is improved, pull the latest version with one command:
+
+```bash
+bash update.sh
+```
+
+It pulls the newest code, installs any new dependencies, and runs the health
+check. **Your own files are never touched** — your credentials, accounts,
+service-account key, and saved logins are all private to you and aren't part of
+the shared code. So you can update anytime and your setup stays exactly as it
+was. (Or just ask Claude Code: *"pull the latest updates."*)
+
+---
+
 ## Troubleshooting
 
 | Problem | Fix |

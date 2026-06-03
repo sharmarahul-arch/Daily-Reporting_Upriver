@@ -181,6 +181,25 @@ tells you precisely what to fix before your first run.
 
 ---
 
+## Getting updates
+
+When the tool is improved, pull the latest version with one command:
+
+```bash
+bash update.sh
+```
+
+This pulls the newest code, reinstalls any new dependencies, refreshes the
+browser, and runs `--doctor`. **Your personal files are never touched** —
+`config/credentials.json`, `config/accounts.xlsx`, your service-account key,
+and your saved `sessions/` are all git-ignored, so an update only changes the
+code, never your setup.
+
+(Plain `git pull` also works, but won't install newly-added dependencies —
+`update.sh` handles that for you.)
+
+---
+
 ## Project structure
 
 ```
