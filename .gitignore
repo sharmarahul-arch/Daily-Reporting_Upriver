@@ -34,3 +34,4 @@ __pycache__/
 
 # Generated shareable docs (regenerate anytime)
 *.docx
+*.pdf
