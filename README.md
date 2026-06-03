@@ -2,6 +2,11 @@
 
 Automatically pulls **yesterday's** Seller Central + Amazon Ads data for every account you manage, and uploads it to that account's Google Sheet. Built for agencies running multiple seller accounts under one Amazon login.
 
+> 👋 **Setting this up for the first time / for a teammate?**
+> Follow **[COLLEAGUE_SETUP.md](COLLEAGUE_SETUP.md)** — a step-by-step guide
+> (including creating your own Google service account), then run
+> `python main.py --doctor` to verify everything.
+
 **What it collects per account:**
 
 | Tab written to | Source | One row per |
