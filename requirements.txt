@@ -5,3 +5,4 @@ pandas==2.2.2
 openpyxl==3.1.2
 python-dateutil==2.9.0
 apscheduler==3.10.4
+python-telegram-bot[job-queue]==22.5

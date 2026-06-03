@@ -1,10 +1,14 @@
 # --- Secrets / per-user config (NEVER commit) ---
-config/accounts.xlsx
-config/accounts.json
-config/credentials.json
-# Service account JSON, anywhere
+# Ignore EVERYTHING in config/ except the example templates, so a dropped-in
+# service-account key (any filename), real credentials, and the accounts file
+# can never be committed by accident.
+config/*
+!config/credentials.example.json
+!config/accounts.example.xlsx
+# Service-account JSON anywhere else in the tree, just in case
 *service-account*.json
 *sheet-bridge*.json
+*.iam.gserviceaccount.json
 
 # --- Per-user state ---
 sessions/

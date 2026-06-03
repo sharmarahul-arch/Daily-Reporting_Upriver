@@ -25,11 +25,50 @@ _creds = _load_credentials()
 
 AMAZON_EMAIL    = _creds["amazon_email"]
 AMAZON_PASSWORD = _creds["amazon_password"]
-SHEETS_CREDS_PATH = _creds["sheets_service_account_path"]
 
-# Chrome User Data directory (macOS default).
-# IMPORTANT: Close Google Chrome before running the script.
-CHROME_USER_DATA_DIR = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
+
+def _resolve_service_account_path() -> str:
+    """
+    Find the Google service-account JSON key, in priority order:
+      1. The path set in credentials.json (absolute, or relative to project root)
+      2. Any *.json that looks like a service account dropped into config/
+    This lets a new user simply drop their key file into config/ without
+    editing any path — fully portable across machines.
+    """
+    raw = (_creds.get("sheets_service_account_path") or "").strip()
+    if raw:
+        p = Path(raw)
+        if not p.is_absolute():
+            p = BASE_DIR / p          # resolve relative paths against project root
+        if p.exists():
+            return str(p)
+
+    # Auto-detect: a service-account key dropped into config/
+    for pattern in ("*service-account*.json", "*service_account*.json",
+                    "*sheet*bridge*.json", "*-*.iam.gserviceaccount.json"):
+        hits = sorted(CONFIG_DIR.glob(pattern))
+        if hits:
+            return str(hits[0])
+
+    # Last resort: scan config/ for any JSON containing a service-account marker
+    for jf in sorted(CONFIG_DIR.glob("*.json")):
+        if jf.name in ("credentials.json", "credentials.example.json", "accounts.json"):
+            continue
+        try:
+            with open(jf) as f:
+                if '"type": "service_account"' in f.read():
+                    return str(jf)
+        except Exception:
+            pass
+
+    raise FileNotFoundError(
+        "Google service-account key not found.\n"
+        "Either set 'sheets_service_account_path' in config/credentials.json, "
+        "or simply drop your service-account .json file into the config/ folder."
+    )
+
+
+SHEETS_CREDS_PATH = _resolve_service_account_path()
 
 SC_BASE_URL      = "https://sellercentral.amazon.in"
 SC_BASE_URL_US   = "https://sellercentral.amazon.com"
