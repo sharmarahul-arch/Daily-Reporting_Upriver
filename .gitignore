@@ -31,3 +31,4 @@ __pycache__/
 
 # --- Per-user tooling state ---
 .claude/
+/.github_test
