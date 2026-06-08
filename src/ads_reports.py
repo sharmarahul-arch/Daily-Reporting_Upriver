@@ -28,7 +28,15 @@ def _ads_urls(account: dict) -> tuple[str, str]:
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
+# Debug screenshots are OFF by default (each full-page shot costs ~1-2s).
+# Turn on with DEBUG_SHOTS=1 when diagnosing a scraping issue.
+import os as _os
+_DEBUG_SHOTS = _os.environ.get("DEBUG_SHOTS", "").strip() not in ("", "0", "false", "False")
+
+
 async def _debug_screenshot(page: Page, label: str):
+    if not _DEBUG_SHOTS:
+        return
     try:
         DOWNLOADS_DIR.mkdir(exist_ok=True)
         path = DOWNLOADS_DIR / f"debug_{label}.png"
@@ -444,7 +452,7 @@ async def _set_dashboard_date_yesterday(page: Page, account_name: str, target_da
                     if "advertising.amazon" not in page.url:
                         log.warning("[%s] Apply navigated away — recovering", account_name)
                         await page.goto(url_before, wait_until="domcontentloaded", timeout=30000)
-                        await page.wait_for_load_state("networkidle", timeout=15000)
+                        await page.wait_for_load_state("networkidle", timeout=7000)
                         applied = None
 
             # Last resort: keyboard Enter (if picker still open with focus)
@@ -511,7 +519,7 @@ async def _click_export_and_download(page: Page, account_name: str, label: str) 
     Returns the downloaded file path, or None.
     """
     try:
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_load_state("networkidle", timeout=7000)
     except Exception:
         log.info("[%s] Network not fully idle — proceeding with export for %s", account_name, label)
     await page.wait_for_timeout(2000)
@@ -716,7 +724,7 @@ async def _navigate_to_products_tab(
             log.info("[%s] Navigating directly to Products URL (entityId=%s)", account_name, entity_id)
             await page.goto(products_url, wait_until="domcontentloaded", timeout=30000)
             try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
+                await page.wait_for_load_state("networkidle", timeout=7000)
             except Exception:
                 pass  # Continue even if background calls never settle
             await page.wait_for_timeout(3000)
@@ -763,7 +771,7 @@ async def _navigate_to_products_tab(
             log.info("[%s] Clicked Products element: %s (href: %s)",
                      account_name, result.get("clicked", "?"), result.get("href", ""))
             try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
+                await page.wait_for_load_state("networkidle", timeout=7000)
             except Exception:
                 pass
             await page.wait_for_timeout(3000)
@@ -911,7 +919,7 @@ async def _download_all_pages(
 
         log.info("[%s] %s: → page %d (%s)", account_name, label, page_num + 1, next_clicked)
         try:
-            await page.wait_for_load_state("networkidle", timeout=10000)
+            await page.wait_for_load_state("networkidle", timeout=6000)
         except Exception:
             pass
         await page.wait_for_timeout(1500)
@@ -1097,7 +1105,7 @@ async def _handle_choose_account_page(page: Page, account_name: str, marketplace
         except Exception:
             pass
         try:
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_load_state("networkidle", timeout=7000)
         except Exception:
             pass
         await page.wait_for_timeout(2000)
@@ -1134,7 +1142,7 @@ async def download_campaign_report(page: Page, account: dict, account_name: str,
 
         # Wait for page to settle — catch networkidle timeout gracefully
         try:
-            await page.wait_for_load_state("networkidle", timeout=20000)
+            await page.wait_for_load_state("networkidle", timeout=7000)
         except Exception:
             log.info("[%s] Network not idle — continuing with campaign report", account_name)
         await page.wait_for_timeout(3000)
@@ -1191,7 +1199,7 @@ async def download_advertised_products_report(page: Page, account: dict, account
         if "advertising.amazon" not in current:
             await page.goto(campaign_manager_url, wait_until="domcontentloaded", timeout=30000)
             try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
+                await page.wait_for_load_state("networkidle", timeout=7000)
             except Exception:
                 pass
             await page.wait_for_timeout(3000)

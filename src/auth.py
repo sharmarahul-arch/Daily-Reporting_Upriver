@@ -16,6 +16,10 @@ from src.config import SESSIONS_DIR, DOWNLOADS_DIR, SC_SWITCHER_URL, SC_BASE_URL
 
 log = logging.getLogger(__name__)
 
+# Debug screenshots off by default (each full-page shot ~1-2s). Set DEBUG_SHOTS=1 to enable.
+import os as _os
+_DEBUG_SHOTS = _os.environ.get("DEBUG_SHOTS", "").strip() not in ("", "0", "false", "False")
+
 
 # ── Session persistence ───────────────────────────────────────────────────────
 
@@ -106,7 +110,7 @@ async def _handle_otp(page: Page, label: str = ""):
                         await page.keyboard.press("Enter")
 
                     try:
-                        await page.wait_for_load_state("networkidle", timeout=20000)
+                        await page.wait_for_load_state("networkidle", timeout=7000)
                     except Exception:
                         pass
                     log.info("OTP submitted via Telegram — continuing")
@@ -135,7 +139,7 @@ async def _handle_otp(page: Page, label: str = ""):
             ),
             timeout=180_000,
         )
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        await page.wait_for_load_state("networkidle", timeout=7000)
         log.info("OTP completed — continuing.")
     except Exception as exc:
         log.error("OTP wait timed out or failed: %s", exc)
@@ -153,7 +157,7 @@ async def login_seller_central(page: Page, email: str, password: str, base_url: 
     log.info("Logging into Seller Central (%s)...", base_url)
     await page.goto(f"{base_url}/gp/homepage.html", wait_until="domcontentloaded", timeout=30000)
     try:
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        await page.wait_for_load_state("networkidle", timeout=7000)
     except Exception:
         pass
 
@@ -223,7 +227,7 @@ async def login_seller_central(page: Page, email: str, password: str, base_url: 
             await page.fill("#ap_password", password)
             await page.click("#signInSubmit")
             try:
-                await page.wait_for_load_state("networkidle", timeout=20000)
+                await page.wait_for_load_state("networkidle", timeout=7000)
             except Exception:
                 pass
         except Exception:
@@ -305,7 +309,7 @@ async def switch_sc_account(
         log.info("[%s] SC fast-path: direct navigation with cached IDs", brand_name)
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_load_state("networkidle", timeout=20000)
+            await page.wait_for_load_state("networkidle", timeout=7000)
             await page.wait_for_timeout(1500)
         except Exception as exc:
             log.warning("[%s] Fast-path nav failed: %s — falling back to UI flow", brand_name, exc)
@@ -330,7 +334,7 @@ async def switch_sc_account(
 
     # Navigate to SC homepage — typically redirects to account selector if multiple accounts
     await page.goto(f"{sc_base}/gp/homepage.html", wait_until="domcontentloaded", timeout=30000)
-    await page.wait_for_load_state("networkidle", timeout=20000)
+    await page.wait_for_load_state("networkidle", timeout=7000)
     await page.wait_for_timeout(2000)
 
     # If not on the switcher, navigate directly to the known switcher URL
@@ -340,12 +344,13 @@ async def switch_sc_account(
             f"{sc_base}/account-switcher/default/merchantMarketplace?returnTo=%2Fgp%2Fhomepage.html",
             wait_until="domcontentloaded", timeout=20000
         )
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        await page.wait_for_load_state("networkidle", timeout=7000)
         await page.wait_for_timeout(2000)
 
     # Take debug screenshot
     DOWNLOADS_DIR.mkdir(exist_ok=True)
-    await page.screenshot(path=str(DOWNLOADS_DIR / f"debug_{brand_name}_switcher.png"), full_page=True)
+    if _DEBUG_SHOTS:
+        await page.screenshot(path=str(DOWNLOADS_DIR / f"debug_{brand_name}_switcher.png"), full_page=True)
     log.info("[%s] Switcher URL: %s", brand_name, page.url)
 
     # Wait for the React account list to render (it loads async via API call)
@@ -753,7 +758,7 @@ async def switch_sc_account(
                     if (btn) btn.click();
                 }
             """)
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_load_state("networkidle", timeout=7000)
         await page.wait_for_timeout(2000)
         await page.screenshot(path=str(DOWNLOADS_DIR / f"debug_{brand_name}_after_select.png"))
     else:
@@ -769,7 +774,7 @@ async def switch_sc_account(
     log.info("[%s] After 'Select account': %s", brand_name, current)
     if "account-switcher" in current:
         await page.goto(f"{sc_home}/gp/homepage.html", wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_load_state("networkidle", timeout=7000)
         await page.wait_for_timeout(2000)
 
     final = page.url
@@ -799,7 +804,7 @@ async def login_ads(page: Page, email: str, password: str, start_url: str = None
 
     log.info("Logging into Amazon Ads (%s)...", start_url)
     await page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
-    await page.wait_for_load_state("networkidle", timeout=20000)
+    await page.wait_for_load_state("networkidle", timeout=7000)
     await page.wait_for_timeout(2000)
 
     # Already on Ads management console
@@ -815,14 +820,14 @@ async def login_ads(page: Page, email: str, password: str, start_url: str = None
             continue_btn = await page.query_selector("#continue")
             if continue_btn:
                 await page.click("#continue")
-                await page.wait_for_load_state("networkidle", timeout=15000)
+                await page.wait_for_load_state("networkidle", timeout=7000)
 
         # Password step
         pwd_field = await page.query_selector("#ap_password")
         if pwd_field:
             await page.fill("#ap_password", password)
             await page.click("#signInSubmit")
-            await page.wait_for_load_state("networkidle", timeout=20000)
+            await page.wait_for_load_state("networkidle", timeout=7000)
 
         # OTP
         if _is_auth_page(page.url):
@@ -865,7 +870,7 @@ async def switch_ads_account(
     # Navigate to campaign manager (may show profile selector)
     try:
         await page.goto(campaign_manager_url, wait_until="commit", timeout=30000)
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_load_state("networkidle", timeout=7000)
         await page.wait_for_timeout(2000)
     except Exception as exc:
         log.warning("[%s] Ads nav failed: %s", brand_name, exc)
@@ -876,7 +881,8 @@ async def switch_ads_account(
 
     # Take screenshot to see current state
     DOWNLOADS_DIR.mkdir(exist_ok=True)
-    await page.screenshot(path=str(DOWNLOADS_DIR / f"debug_{brand_name}_ads_switch.png"), full_page=True)
+    if _DEBUG_SHOTS:
+        await page.screenshot(path=str(DOWNLOADS_DIR / f"debug_{brand_name}_ads_switch.png"), full_page=True)
     log.info("[%s] Ads page: %s", brand_name, page.url)
 
     # The Ads campaign manager shows the current entity/brand name in the top-right header.
@@ -936,9 +942,10 @@ async def switch_ads_account(
     await page.wait_for_timeout(2500)   # wait for dropdown to render
 
     # Screenshot the open dropdown for debugging
-    await page.screenshot(
-        path=str(DOWNLOADS_DIR / f"debug_{brand_name}_entity_dropdown.png"), full_page=False
-    )
+    if _DEBUG_SHOTS:
+        await page.screenshot(
+            path=str(DOWNLOADS_DIR / f"debug_{brand_name}_entity_dropdown.png"), full_page=False
+        )
 
     # ── Search for the target entity ────────────────────────────────────────────
     # The entity list panel opens on the RIGHT side of the viewport.
@@ -1105,9 +1112,10 @@ async def switch_ads_account(
         # Wait for SPA to update after entity switch (may be instant or slow)
         await page.wait_for_timeout(3000)
         # Take a screenshot to verify the switch
-        await page.screenshot(
-            path=str(DOWNLOADS_DIR / f"debug_{brand_name}_after_entity_switch.png"), full_page=False
-        )
+        if _DEBUG_SHOTS:
+            await page.screenshot(
+                path=str(DOWNLOADS_DIR / f"debug_{brand_name}_after_entity_switch.png"), full_page=False
+            )
         log.info("[%s] Ads entity switched — url: %s", brand_name, page.url)
     else:
         visible_rows = await page.evaluate("""

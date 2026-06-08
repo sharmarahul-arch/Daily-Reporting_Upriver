@@ -5,10 +5,14 @@ Downloads two reports from Amazon Seller Central (India):
 """
 
 import logging
+import os
 import re
 from pathlib import Path
 from datetime import date, timedelta
 from typing import Optional
+
+# Debug screenshots off by default (each full-page shot ~1-2s). Set DEBUG_SHOTS=1 to enable.
+_DEBUG_SHOTS = os.environ.get("DEBUG_SHOTS", "").strip() not in ("", "0", "false", "False")
 
 import pandas as pd
 from playwright.async_api import Page
@@ -46,7 +50,7 @@ async def download_sales_report(page: Page, account_name: str, marketplace: str 
             wait_until="domcontentloaded",
             timeout=30000,
         )
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_load_state("networkidle", timeout=7000)
         await page.wait_for_timeout(2500)
 
         # ── Step 1: Click "Detail Page Sales and Traffic By Child Item" in nav ──
@@ -78,14 +82,15 @@ async def download_sales_report(page: Page, account_name: str, marketplace: str 
         """)
         if nav_clicked:
             log.info("[%s] Opened report: '%s'", account_name, nav_clicked)
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_load_state("networkidle", timeout=7000)
             await page.wait_for_timeout(3000)
         else:
             log.warning("[%s] Could not find 'Detail Page Sales and Traffic By Child Item' nav link",
                         account_name)
 
-        await page.screenshot(path=str(DOWNLOADS_DIR / f"debug_{account_name}_sales_report_page.png"),
-                              full_page=True)
+        if _DEBUG_SHOTS:
+            await page.screenshot(path=str(DOWNLOADS_DIR / f"debug_{account_name}_sales_report_page.png"),
+                                  full_page=True)
 
         # ── Step 2: Set the date range to yesterday ───────────────────────────
         await _set_date_to_yesterday(page, account_name, report_date)
@@ -141,7 +146,7 @@ async def download_sales_report(page: Page, account_name: str, marketplace: str 
             await page.wait_for_timeout(15000)
             try:
                 await page.reload()
-                await page.wait_for_load_state("networkidle", timeout=15000)
+                await page.wait_for_load_state("networkidle", timeout=7000)
                 await page.wait_for_timeout(2000)
             except Exception:
                 pass
@@ -317,7 +322,7 @@ async def download_inventory_report(page: Page, account_name: str, marketplace: 
             wait_until="domcontentloaded",
             timeout=30000,
         )
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_load_state("networkidle", timeout=7000)
         await page.wait_for_timeout(2000)
 
         # Look for export / download button on Manage Inventory
@@ -343,7 +348,7 @@ async def download_inventory_report(page: Page, account_name: str, marketplace: 
             wait_until="domcontentloaded",
             timeout=30000,
         )
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        await page.wait_for_load_state("networkidle", timeout=7000)
         await page.wait_for_timeout(2000)
 
         # Request a new FBA inventory report
@@ -369,7 +374,7 @@ async def download_inventory_report(page: Page, account_name: str, marketplace: 
             log.info("[%s] Waiting for inventory report... (attempt %d/10)", account_name, attempt + 1)
             await page.wait_for_timeout(5000)
             await page.reload()
-            await page.wait_for_load_state("networkidle", timeout=10000)
+            await page.wait_for_load_state("networkidle", timeout=6000)
 
         log.warning("[%s] Inventory report not ready after waiting", account_name)
         return None
