@@ -50,7 +50,12 @@ async def download_sales_report(page: Page, account_name: str, marketplace: str 
             wait_until="domcontentloaded",
             timeout=30000,
         )
-        await page.wait_for_load_state("networkidle", timeout=7000)
+        # networkidle is best-effort — the US SC dashboard rarely goes fully idle,
+        # so a timeout here must NOT abort the sales pull (it previously did).
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
         await page.wait_for_timeout(2500)
 
         # ── Step 1: Click "Detail Page Sales and Traffic By Child Item" in nav ──
@@ -82,7 +87,10 @@ async def download_sales_report(page: Page, account_name: str, marketplace: str 
         """)
         if nav_clicked:
             log.info("[%s] Opened report: '%s'", account_name, nav_clicked)
-            await page.wait_for_load_state("networkidle", timeout=7000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
             await page.wait_for_timeout(3000)
         else:
             log.warning("[%s] Could not find 'Detail Page Sales and Traffic By Child Item' nav link",
