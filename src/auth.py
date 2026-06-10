@@ -941,6 +941,38 @@ async def switch_ads_account(
 
     await page.wait_for_timeout(2500)   # wait for dropdown to render
 
+    # The entity panel sometimes fails to open on the first click (slow/flaky
+    # ads UI). Poll for it; if still empty, re-click the switcher and wait again,
+    # up to a few times. Without this, a sluggish panel = "entity NOT FOUND".
+    async def _entity_panel_count():
+        return await page.evaluate("""
+            () => {
+                const isVis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+                const vw = window.innerWidth;
+                return Array.from(document.querySelectorAll(
+                    'li, [role="option"], [role="menuitem"], [class*="entity-item"], [class*="profile-item"]'
+                )).filter(el => isVis(el) && el.getBoundingClientRect().left > vw * 0.35).length;
+            }
+        """)
+
+    for _open_try in range(4):
+        if await _entity_panel_count() > 0:
+            break
+        log.info("[%s] Entity panel not open (attempt %d) — re-clicking switcher", brand_name, _open_try + 1)
+        await page.evaluate("""
+            () => {
+                const isVis = el => {
+                    const r = el.getBoundingClientRect();
+                    const s = window.getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                };
+                const btn = Array.from(document.querySelectorAll('button,[role="button"]'))
+                    .filter(isVis).find(b => (b.innerText || '').toLowerCase().includes('sponsored ads'));
+                if (btn) btn.click();
+            }
+        """)
+        await page.wait_for_timeout(3500)
+
     # Screenshot the open dropdown for debugging
     if _DEBUG_SHOTS:
         await page.screenshot(
