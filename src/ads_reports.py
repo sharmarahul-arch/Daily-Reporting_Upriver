@@ -985,6 +985,24 @@ async def _sort_by_spends(page: Page, account_name: str):
         log.warning("[%s] Error sorting by Spends: %s", account_name, exc)
 
 
+async def _wait_for_campaign_table(page: Page, account_name: str, timeout_s: int = 15) -> bool:
+    """
+    Poll for the campaign/products table to actually render its rows before we
+    read/sort/export it. The Ads SPA reloads the table after a date change and
+    sometimes renders it slowly; reading too early yields an empty (1-row)
+    export. Returns True once the table shows a results-count or multiple rows.
+    """
+    # Poll for the SAME pagination text the exporter relies on ("1-300 of 489").
+    # Using this authoritative signal (not a loose row count) avoids false
+    # positives where stray chart/nav rows look like a populated grid.
+    for _ in range(timeout_s):
+        pag = await page.evaluate(_PAG_TEXT_JS)
+        if pag:
+            return True
+        await page.wait_for_timeout(1000)
+    return False
+
+
 async def _set_max_results_per_page(page: Page, account_name: str):
     """Find and click the 'Results per page' dropdown and select the highest number."""
     try:
@@ -1155,6 +1173,26 @@ async def download_campaign_report(page: Page, account: dict, account_name: str,
         # ── Set the report date ───────────────────────────────────────────────────
         await _set_dashboard_date_yesterday(page, account_name, report_date)
         await _debug_screenshot(page, f"{account_name}_campaign_after_date")
+
+        # ── Ensure the campaign table actually rendered before reading it ─────────
+        # The date-apply reloads the grid; reading before it renders yields a
+        # 1-row export. Poll for the table; if empty, reload + re-set date + retry.
+        if not await _wait_for_campaign_table(page, account_name):
+            for _retry in range(2):
+                log.warning("[%s] Campaign table not rendered — reload + re-set date (retry %d)",
+                            account_name, _retry + 1)
+                try:
+                    if entity_id:
+                        await page.goto(campaign_url, wait_until="domcontentloaded", timeout=30000)
+                    else:
+                        await page.reload(wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(3000)
+                except Exception:
+                    pass
+                await _set_dashboard_date_yesterday(page, account_name, report_date)
+                if await _wait_for_campaign_table(page, account_name):
+                    log.info("[%s] Campaign table rendered after retry %d", account_name, _retry + 1)
+                    break
 
         # ── Sort by Spends and set max results per page ───────────────────────────
         await _sort_by_spends(page, account_name)
