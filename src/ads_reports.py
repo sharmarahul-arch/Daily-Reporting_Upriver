@@ -985,7 +985,7 @@ async def _sort_by_spends(page: Page, account_name: str):
         log.warning("[%s] Error sorting by Spends: %s", account_name, exc)
 
 
-async def _wait_for_campaign_table(page: Page, account_name: str, timeout_s: int = 15) -> bool:
+async def _wait_for_campaign_table(page: Page, account_name: str, timeout_s: int = 30) -> bool:
     """
     Poll for the campaign/products table to actually render its rows before we
     read/sort/export it. The Ads SPA reloads the table after a date change and
@@ -1178,7 +1178,7 @@ async def download_campaign_report(page: Page, account: dict, account_name: str,
         # The date-apply reloads the grid; reading before it renders yields a
         # 1-row export. Poll for the table; if empty, reload + re-set date + retry.
         if not await _wait_for_campaign_table(page, account_name):
-            for _retry in range(2):
+            for _retry in range(3):
                 log.warning("[%s] Campaign table not rendered — reload + re-set date (retry %d)",
                             account_name, _retry + 1)
                 try:
