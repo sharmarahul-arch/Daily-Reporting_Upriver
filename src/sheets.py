@@ -2,10 +2,13 @@
 Google Sheets integration.
 Each report type goes to a dedicated tab in the master spreadsheet.
 Rows are appended daily (headers written once on first use).
+When a replace_date is given, existing rows for that Report Date are
+deleted first so re-pulls overwrite instead of duplicating.
 """
 
 import logging
 import re
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import gspread
@@ -53,6 +56,76 @@ def _get_or_create_worksheet(spreadsheet: gspread.Spreadsheet, tab_name: str) ->
         return ws
 
 
+# Google Sheets stores dates as serial numbers counted from this epoch
+_SHEETS_EPOCH = datetime(1899, 12, 30)
+
+_DATE_FORMATS = (
+    "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d",
+    "%d %b %Y", "%b %d, %Y",
+)
+
+
+def _cell_to_date(val) -> Optional[date]:
+    """Best-effort conversion of a sheet cell (serial number or text) to a date."""
+    if val is None or val == "":
+        return None
+    try:
+        return (_SHEETS_EPOCH + timedelta(days=float(val))).date()
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _delete_rows_for_date(ws: gspread.Worksheet, replace_date: date) -> int:
+    """
+    Delete all data rows whose 'Report Date' cell equals replace_date.
+    Returns the number of rows deleted. No-op when the tab has no
+    'Report Date' column or no matching rows.
+    """
+    values = ws.get_values(
+        value_render_option=gspread.utils.ValueRenderOption.unformatted
+    )
+    if not values:
+        return 0
+    headers = [str(h).strip() for h in values[0]]
+    try:
+        col = headers.index("Report Date")
+    except ValueError:
+        return 0
+
+    # 1-based sheet rows of matches (values[i] is sheet row i+1)
+    matches = [
+        i + 1
+        for i, row in enumerate(values[1:], start=1)
+        if col < len(row) and _cell_to_date(row[col]) == replace_date
+    ]
+    if not matches:
+        return 0
+
+    # Group into contiguous ranges, delete bottom-up so indices stay valid
+    ranges = []
+    start = prev = matches[0]
+    for r in matches[1:]:
+        if r == prev + 1:
+            prev = r
+        else:
+            ranges.append((start, prev))
+            start = prev = r
+    ranges.append((start, prev))
+    for s, e in reversed(ranges):
+        ws.delete_rows(s, e)
+
+    log.info("Replaced %d existing rows for %s in '%s' tab",
+             len(matches), replace_date.isoformat(), ws.title)
+    return len(matches)
+
+
 def clear_and_upload(df: pd.DataFrame, sheet_id: str, tab_name: str):
     """
     Clear the named tab completely, then write headers + data fresh.
@@ -75,11 +148,14 @@ def clear_and_upload(df: pd.DataFrame, sheet_id: str, tab_name: str):
     log.info("Wrote %d rows to '%s' tab", len(df), tab_name)
 
 
-def upload_dataframe(df: pd.DataFrame, sheet_id: str, report_key: str, account_name: str = None) -> int:
+def upload_dataframe(df: pd.DataFrame, sheet_id: str, report_key: str, account_name: str = None,
+                     replace_date: Optional[date] = None) -> int:
     """
     Write df to the account's own Google Sheet.
     Each account has its own sheet_id — tab names are just the report type
     (e.g. "Sales", "Ad Campaigns") with no account prefix.
+    replace_date: delete existing rows for this Report Date before appending,
+    so re-pulls (attribution backfill) overwrite instead of duplicating.
     Returns the number of rows uploaded (0 if skipped).
     """
     if df is None or df.empty:
@@ -93,6 +169,13 @@ def upload_dataframe(df: pd.DataFrame, sheet_id: str, report_key: str, account_n
     client = _get_client()
     spreadsheet = client.open_by_key(sheet_id)
     ws = _get_or_create_worksheet(spreadsheet, tab_name)
+
+    if replace_date is not None:
+        try:
+            _delete_rows_for_date(ws, replace_date)
+        except Exception as exc:
+            log.warning("Could not delete old rows for %s in '%s': %s — appending anyway",
+                        replace_date.isoformat(), tab_name, exc)
 
     # Write headers if they are not already in row 1
     existing = ws.get_all_values()

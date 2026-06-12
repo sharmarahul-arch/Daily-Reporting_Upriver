@@ -162,10 +162,11 @@ Use `nohup` / `screen` / `tmux` to keep it running.
 ## CLI reference
 
 ```bash
-python main.py                           # run all active accounts (SC + Ads), yesterday
+python main.py                           # run all active accounts (SC + Ads), yesterday + 2-day backfill
 python main.py --account "Name"          # run one account only
+python main.py --backfill-days 0         # skip the attribution backfill (yesterday only)
 python main.py --exclude "Charlotte Home"  # run all EXCEPT these (comma-separated)
-python main.py --date 2026-05-30         # pull a specific past day instead of yesterday
+python main.py --date 2026-05-30         # pull a specific past day instead of yesterday (no backfill)
 python main.py --sc-only                 # Seller Central reports only
 python main.py --ads-only                # Ads reports only
 python main.py --clear-sessions          # forget saved logins (forces fresh OTP)

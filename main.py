@@ -31,7 +31,7 @@ from src.config import (
     ADS_CAMPAIGN_MANAGER, ADS_CAMPAIGN_MANAGER_US,
     SC_BASE_URL, SC_BASE_URL_US,
 )
-from src.utils import setup_logging, yesterday, clean_downloads, resolve_report_date
+from src.utils import setup_logging, yesterday, clean_downloads
 from src.auth import (
     restore_session, save_session, clear_session,
     login_seller_central, login_ads,
@@ -46,8 +46,21 @@ log = logging.getLogger(__name__)
 
 
 async def run(filter_account: Optional[str] = None, headless: bool = False, sc_only: bool = False,
-              ads_only: bool = False, target_date=None, exclude_accounts=None):
+              ads_only: bool = False, target_date=None, exclude_accounts=None,
+              backfill_days: int = 2):
     accounts = load_accounts()
+
+    # ── Attribution backfill ──────────────────────────────────────────────
+    # Amazon keeps re-attributing ad sales for several days after the fact,
+    # so a normal (yesterday) run also re-pulls the N days before yesterday
+    # and REPLACES those rows in Sheets (see upload_dataframe replace_date).
+    # An explicit --date run pulls only that one day (still replace-on-upload).
+    from datetime import date as _date, timedelta as _td
+    if target_date is not None:
+        report_dates = [target_date]
+    else:
+        yest = _date.today() - _td(days=1)
+        report_dates = [yest - _td(days=n) for n in range(backfill_days, 0, -1)] + [yest]
     if filter_account:
         accounts = [a for a in accounts if a["name"].lower() == filter_account.lower()]
         if not accounts:
@@ -204,7 +217,8 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
             active_cm_url         = ADS_CAMPAIGN_MANAGER_US if is_us else ADS_CAMPAIGN_MANAGER
 
             log.info("=" * 60)
-            log.info("Processing: %s  (date: %s)", name, resolve_report_date(target_date).isoformat())
+            log.info("Processing: %s  (dates: %s)", name,
+                     ", ".join(d.isoformat() for d in report_dates))
             log.info("=" * 60)
             await bot_ctx.send(f"📍 *{name}* — starting...")
 
@@ -232,10 +246,11 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
                         else:
                             if mcid != "UNKNOWN":
                                 sc_seen_ids[mcid] = name
-                            sales_df = await download_sales_report(active_sc_page, name, marketplace=marketplace, target_date=target_date)
-                            rows = upload_dataframe(sales_df, sheet_id, "sales")
-                            if rows:
-                                account_summary.append(f"Sales: {rows} rows")
+                            for rd in report_dates:
+                                sales_df = await download_sales_report(active_sc_page, name, marketplace=marketplace, target_date=rd)
+                                rows = upload_dataframe(sales_df, sheet_id, "sales", replace_date=rd)
+                                if rows:
+                                    account_summary.append(f"Sales {rd.isoformat()}: {rows} rows")
                     else:
                         log.error("[%s] Skipping SC reports — account switch failed", name)
                         account_summary.append("Sales: ❌ switch failed")
@@ -268,15 +283,17 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
                             if entity_id != "UNKNOWN":
                                 ads_seen_ids[entity_id] = name
 
-                            campaign_df = await download_campaign_report(active_ads_page, account, name, target_date=target_date)
-                            rows = upload_dataframe(campaign_df, sheet_id, "campaigns")
-                            if rows:
-                                account_summary.append(f"Campaigns: {rows} rows")
+                            for rd in report_dates:
+                                campaign_df = await download_campaign_report(active_ads_page, account, name, target_date=rd)
+                                rows = upload_dataframe(campaign_df, sheet_id, "campaigns", replace_date=rd)
+                                if rows:
+                                    account_summary.append(f"Campaigns {rd.isoformat()}: {rows} rows")
 
-                            products_df = await download_advertised_products_report(active_ads_page, account, name, target_date=target_date)
-                            rows = upload_dataframe(products_df, sheet_id, "advertised_products")
-                            if rows:
-                                account_summary.append(f"Products: {rows} rows")
+                            for rd in report_dates:
+                                products_df = await download_advertised_products_report(active_ads_page, account, name, target_date=rd)
+                                rows = upload_dataframe(products_df, sheet_id, "advertised_products", replace_date=rd)
+                                if rows:
+                                    account_summary.append(f"Products {rd.isoformat()}: {rows} rows")
 
                 except Exception as exc:
                     log.exception("[%s] Ads error: %s", name, exc)
@@ -319,6 +336,10 @@ def main():
                         help="Same as --capture-ids but re-captures ALL accounts (overwriting existing IDs)")
     parser.add_argument("--date", help="Pull a specific day (YYYY-MM-DD) instead of yesterday")
     parser.add_argument("--exclude", help="Comma-separated account names to skip (e.g. \"Charlotte Home\")")
+    parser.add_argument("--backfill-days", type=int, default=2,
+                        help="On a default (yesterday) run, also re-pull and replace this many "
+                             "days before yesterday to absorb Amazon attribution updates "
+                             "(default: 2, use 0 to disable)")
     args = parser.parse_args()
 
     target_date = None
@@ -357,6 +378,7 @@ def main():
         ads_only=args.ads_only,
         target_date=target_date,
         exclude_accounts=exclude_accounts,
+        backfill_days=max(0, args.backfill_days),
     ))
 
 
