@@ -846,6 +846,68 @@ _CLICK_NEXT_JS = """
     }
 """
 
+_CLICK_PREV_JS = """
+    () => {
+        const isEnabled = b =>
+            !b.disabled &&
+            b.getAttribute('aria-disabled') !== 'true' &&
+            !b.classList.toString().toLowerCase().includes('disabled') &&
+            b.getBoundingClientRect().width > 0;
+
+        const countEl = Array.from(document.querySelectorAll('*')).find(e => {
+            const t = (e.innerText || '').trim();
+            return /\\d+[-–]\\d+\\s+of\\s+\\d+/i.test(t) && e.children.length === 0;
+        });
+        // Guard: stop if already on the first page
+        if (countEl) {
+            const m = (countEl.innerText || '').match(/(\\d+)[-–](\\d+)\\s+of\\s+(\\d+)/i);
+            if (m && parseInt(m[1]) <= 1) return null;
+        }
+
+        const byLabel = Array.from(document.querySelectorAll(
+            'button, a, [role="button"]'
+        )).find(b => {
+            const lbl = (b.getAttribute('aria-label') || '').toLowerCase();
+            return isEnabled(b) && (lbl === 'previous' || lbl === 'previous page' ||
+                   lbl.includes('go to previous'));
+        });
+        if (byLabel) { byLabel.click(); return 'aria-label'; }
+
+        if (countEl) {
+            let parent = countEl.parentElement;
+            for (let i = 0; i < 6 && parent; i++) {
+                const btns = Array.from(parent.querySelectorAll(
+                    'button, a, [role="button"]'
+                )).filter(b => {
+                    if (!isEnabled(b)) return false;
+                    const t = (b.getAttribute('aria-label') || b.innerText || '').trim().toLowerCase();
+                    return !t.includes('per page') && !t.includes('next');
+                });
+                if (btns.length) { btns[0].click(); return 'leftmost-sibling'; }
+                parent = parent.parentElement;
+            }
+        }
+        return null;
+    }
+"""
+
+
+async def _rewind_to_first_page(page: Page, account_name: str, label: str):
+    """
+    A previous export can leave the table mid-pagination; a date change does
+    not always reset it. Click 'previous' until the count shows row 1.
+    """
+    import re as _re
+    for _ in range(15):
+        pag = await page.evaluate(_PAG_TEXT_JS)
+        m = _re.search(r"(\d+)[-–](\d+)\s+of\s+(\d+)", pag or "")
+        if not m or int(m.group(1)) <= 1:
+            return
+        if not await page.evaluate(_CLICK_PREV_JS):
+            return
+        log.info("[%s] %s: rewinding to first page (was at %s)", account_name, label, pag)
+        await page.wait_for_timeout(1200)
+
 
 async def _read_csv_raw(path: "Path") -> "Optional[pd.DataFrame]":
     """Read a CSV/Excel file into a DataFrame without adding Account/Date columns."""
@@ -872,6 +934,8 @@ async def _download_all_pages(
     """
     import re as _re
     import shutil as _shutil
+
+    await _rewind_to_first_page(page, account_name, label)
 
     all_dfs: list = []
     page_num = 0
@@ -985,6 +1049,31 @@ async def _sort_by_spends(page: Page, account_name: str):
         log.warning("[%s] Error sorting by Spends: %s", account_name, exc)
 
 
+_TABLE_ROWS_JS = """
+    () => {
+        const visible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+        let count = 0;
+        for (const row of document.querySelectorAll('[role="row"]')) {
+            if (!visible(row)) continue;
+            // Real data rows have many cells; stray chart/nav pseudo-rows don't
+            if (row.querySelectorAll('[role="gridcell"], [role="cell"], td').length >= 3) count++;
+        }
+        for (const tb of document.querySelectorAll('table tbody')) {
+            let c = 0;
+            for (const tr of tb.querySelectorAll('tr')) {
+                if (visible(tr) && tr.querySelectorAll('td').length >= 3) c++;
+            }
+            count = Math.max(count, c);
+        }
+        if (count > 0) return 'rows:' + count;
+        const txt = (document.body.innerText || '').toLowerCase();
+        if (txt.includes('no campaigns') || txt.includes('no results') || txt.includes('no data available'))
+            return 'empty';
+        return null;
+    }
+"""
+
+
 async def _wait_for_campaign_table(page: Page, account_name: str, timeout_s: int = 30) -> bool:
     """
     Poll for the campaign/products table to actually render its rows before we
@@ -992,13 +1081,24 @@ async def _wait_for_campaign_table(page: Page, account_name: str, timeout_s: int
     sometimes renders it slowly; reading too early yields an empty (1-row)
     export. Returns True once the table shows a results-count or multiple rows.
     """
-    # Poll for the SAME pagination text the exporter relies on ("1-300 of 489").
-    # Using this authoritative signal (not a loose row count) avoids false
-    # positives where stray chart/nav rows look like a populated grid.
+    # Pagination text ("1-300 of 489") is the authoritative signal, but small
+    # accounts whose results fit on one page never show it — those used to
+    # burn the full timeout despite a perfectly rendered table. Fallback:
+    # a visible-row count that is stable across two consecutive polls, or an
+    # explicit empty state.
+    prev_sig = None
     for _ in range(timeout_s):
         pag = await page.evaluate(_PAG_TEXT_JS)
         if pag:
             return True
+        sig = await page.evaluate(_TABLE_ROWS_JS)
+        if sig == "empty":
+            log.info("[%s] Table shows an empty state — treating as rendered", account_name)
+            return True
+        if sig and sig == prev_sig:
+            log.info("[%s] Table rendered (%s, no pagination shown)", account_name, sig)
+            return True
+        prev_sig = sig
         await page.wait_for_timeout(1000)
     return False
 
@@ -1132,10 +1232,13 @@ async def _handle_choose_account_page(page: Page, account_name: str, marketplace
 
 
 async def download_campaign_report(page: Page, account: dict, account_name: str,
-                                   target_date: "date" = None) -> Optional[pd.DataFrame]:
+                                   target_date: "date" = None, navigate: bool = True) -> Optional[pd.DataFrame]:
     """
     Campaigns tab → navigate to entityId URL → set date → Export → Download.
     target_date defaults to yesterday when None.
+    navigate=False reuses the already-open campaigns page (multi-date backfill)
+    and only re-sets the date — falls back to full navigation if the page
+    isn't actually on the campaigns table.
     """
     from src.utils import resolve_report_date
     report_date = resolve_report_date(target_date)
@@ -1147,26 +1250,31 @@ async def download_campaign_report(page: Page, account: dict, account_name: str,
         # ── Get entityId so we can navigate to the right URL ─────────────────────
         entity_id = await _get_entity_id(page)
         log.info("[%s] entityId for Campaign: %s", account_name, entity_id)
+        campaign_url = f"{base_url}/cm/campaigns?entityId={entity_id}" if entity_id else None
 
-        # ── Navigate to the entityId-specific campaigns URL ───────────────────────
-        if entity_id:
-            campaign_url = f"{base_url}/cm/campaigns?entityId={entity_id}"
-            log.info("[%s] Navigating to entity-specific campaign URL", account_name)
-            await page.goto(campaign_url, wait_until="domcontentloaded", timeout=30000)
+        reuse_page = (not navigate and entity_id
+                      and ("/cm/campaigns" in page.url or "campaign-manager" in page.url))
+        if reuse_page:
+            log.info("[%s] Reusing open campaigns page for %s", account_name, report_date.isoformat())
         else:
-            current = page.url
-            if "advertising.amazon" not in current:
-                await page.goto(campaign_manager_url, wait_until="domcontentloaded", timeout=30000)
+            # ── Navigate to the entityId-specific campaigns URL ───────────────────
+            if campaign_url:
+                log.info("[%s] Navigating to entity-specific campaign URL", account_name)
+                await page.goto(campaign_url, wait_until="domcontentloaded", timeout=30000)
+            else:
+                current = page.url
+                if "advertising.amazon" not in current:
+                    await page.goto(campaign_manager_url, wait_until="domcontentloaded", timeout=30000)
 
-        # Wait for page to settle — catch networkidle timeout gracefully
-        try:
-            await page.wait_for_load_state("networkidle", timeout=7000)
-        except Exception:
-            log.info("[%s] Network not idle — continuing with campaign report", account_name)
-        await page.wait_for_timeout(3000)
+            # Wait for page to settle — catch networkidle timeout gracefully
+            try:
+                await page.wait_for_load_state("networkidle", timeout=7000)
+            except Exception:
+                log.info("[%s] Network not idle — continuing with campaign report", account_name)
+            await page.wait_for_timeout(3000)
 
-        # ── Handle marketplace chooser if we somehow end up on the picker ────────
-        await _handle_choose_account_page(page, account_name, marketplace)
+            # ── Handle marketplace chooser if we somehow end up on the picker ────
+            await _handle_choose_account_page(page, account_name, marketplace)
 
         await _debug_screenshot(page, f"{account_name}_campaign_dashboard")
 
@@ -1190,7 +1298,7 @@ async def download_campaign_report(page: Page, account: dict, account_name: str,
                 except Exception:
                     pass
                 await _set_dashboard_date_yesterday(page, account_name, report_date)
-                if await _wait_for_campaign_table(page, account_name):
+                if await _wait_for_campaign_table(page, account_name, timeout_s=15):
                     log.info("[%s] Campaign table rendered after retry %d", account_name, _retry + 1)
                     break
 
@@ -1218,10 +1326,13 @@ async def download_campaign_report(page: Page, account: dict, account_name: str,
 # ── Advertised Products Report ──────────────────────────────────────────────────
 
 async def download_advertised_products_report(page: Page, account: dict, account_name: str,
-                                              target_date: "date" = None) -> Optional[pd.DataFrame]:
+                                              target_date: "date" = None, navigate: bool = True) -> Optional[pd.DataFrame]:
     """
     Products tab → set date → go to last page → Export → Download.
     target_date defaults to yesterday when None.
+    navigate=False reuses the already-open products page (multi-date backfill)
+    and only re-sets the date — falls back to full navigation if the page
+    isn't actually on the products table.
     """
     from src.utils import resolve_report_date
     report_date = resolve_report_date(target_date)
@@ -1229,6 +1340,22 @@ async def download_advertised_products_report(page: Page, account: dict, account
     try:
         marketplace = account.get("marketplace", "IN")
         base_url, campaign_manager_url = _ads_urls(account)
+
+        if not navigate and "/cm/products" in page.url:
+            log.info("[%s] Reusing open products page for %s", account_name, report_date.isoformat())
+            await _set_dashboard_date_yesterday(page, account_name, report_date)
+            await _sort_by_spends(page, account_name)
+            await _set_max_results_per_page(page, account_name)
+            await page.wait_for_timeout(1000)
+            all_dfs = await _download_all_pages(page, account_name, "Products")
+            if all_dfs:
+                combined = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
+                combined.insert(0, "Account", account_name)
+                combined.insert(1, "Report Date", report_date.isoformat())
+                log.info("[%s] Advertised Products rows (all pages): %d", account_name, len(combined))
+                return combined
+            log.warning("[%s] Products reuse-page export empty — falling back to full navigation",
+                        account_name)
 
         # Stay on the current Campaign Manager page to preserve the active entity.
         # Re-navigating to /campaign-manager would reset the entity back to the default.

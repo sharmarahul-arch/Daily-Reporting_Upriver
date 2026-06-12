@@ -28,13 +28,16 @@ _YESTERDAY = (date.today() - timedelta(days=1)).strftime("%m/%d/%Y")
 # ── Sales & Traffic ───────────────────────────────────────────────────────────
 
 async def download_sales_report(page: Page, account_name: str, marketplace: str = "IN",
-                                target_date: Optional["date"] = None) -> Optional[pd.DataFrame]:
+                                target_date: Optional["date"] = None, navigate: bool = True) -> Optional[pd.DataFrame]:
     """
     Downloads the "Detail Page Sales and Traffic By Child Item" Business Report.
     Flow: open Business Reports → click that report in the left nav →
           set date (yesterday by default, or target_date) → Generate → download CSV.
     marketplace: "IN" for India SC, "US" (or any non-IN) for US SC.
     target_date: specific day to pull; defaults to yesterday when None.
+    navigate=False reuses the already-open report page (multi-date backfill)
+    and only re-sets the date — falls back to full navigation if the report
+    page isn't actually showing.
     """
     from src.utils import resolve_report_date
     report_date = resolve_report_date(target_date)
@@ -45,21 +48,32 @@ async def download_sales_report(page: Page, account_name: str, marketplace: str 
         from src.config import DOWNLOADS_DIR
         DOWNLOADS_DIR.mkdir(exist_ok=True)
 
-        await page.goto(
-            f"{sc_base}/business-reports/ref=xx_bizrpt_dnav_xx#/dashboard",
-            wait_until="domcontentloaded",
-            timeout=30000,
-        )
-        # networkidle is best-effort — the US SC dashboard rarely goes fully idle,
-        # so a timeout here must NOT abort the sales pull (it previously did).
-        try:
-            await page.wait_for_load_state("networkidle", timeout=10000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(2500)
+        reuse_page = False
+        if not navigate and "business-reports" in page.url:
+            try:
+                reuse_page = await page.query_selector('[data-testid="selection-box-dropdown"]') is not None
+            except Exception:
+                reuse_page = False
+
+        if reuse_page:
+            log.info("[%s] Reusing open Business Reports page for %s",
+                     account_name, report_date.isoformat())
+        else:
+            await page.goto(
+                f"{sc_base}/business-reports/ref=xx_bizrpt_dnav_xx#/dashboard",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            # networkidle is best-effort — the US SC dashboard rarely goes fully idle,
+            # so a timeout here must NOT abort the sales pull (it previously did).
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            await page.wait_for_timeout(2500)
 
         # ── Step 1: Click "Detail Page Sales and Traffic By Child Item" in nav ──
-        nav_clicked = await page.evaluate("""
+        nav_clicked = None if reuse_page else await page.evaluate("""
             () => {
                 const els = Array.from(document.querySelectorAll(
                     'a, button, [role="link"], [role="menuitem"], li, span, div'
@@ -92,7 +106,7 @@ async def download_sales_report(page: Page, account_name: str, marketplace: str 
             except Exception:
                 pass
             await page.wait_for_timeout(3000)
-        else:
+        elif not reuse_page:
             log.warning("[%s] Could not find 'Detail Page Sales and Traffic By Child Item' nav link",
                         account_name)
 

@@ -196,36 +196,33 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
         sc_seen_ids: dict[str, str] = {}    # mcid -> brand_name that owns it
         ads_seen_ids: dict[str, str] = {}   # entityId -> brand_name that owns it
 
-        # ── Process each account ──────────────────────────────────────────────
-        for account in accounts:
-            name        = account["name"]
-            sc_account  = account.get("sc_account_name", name)
-            sc_parent   = account.get("sc_parent")
-            ads_account = account.get("ads_account_name", name)
-            sheet_id    = account["google_sheet_id"]
-            marketplace = account.get("marketplace", "IN").upper()
-            # Per-account credentials (fall back to global if not set in xlsx)
-            acct_email    = account.get("email") or email
-            acct_password = account.get("password") or password
+        # ── Process accounts: SC and Ads run as CONCURRENT streams ───────────
+        # The SC pages and Ads pages live in separate browser contexts that
+        # never share cookies or account-selection state, so the two report
+        # streams can walk the account list independently and in parallel —
+        # the SC timeline hides almost entirely under the longer Ads timeline.
 
-            # Route US accounts to their own SC/Ads contexts; all others use India
-            is_us = marketplace == "US"
-            active_sc_page        = sc_us_page        if is_us else sc_page
-            active_sc_logged_in   = sc_us_logged_in   if is_us else sc_logged_in
-            active_ads_page       = ads_us_page        if is_us else ads_page
-            active_ads_logged_in  = ads_us_logged_in  if is_us else ads_logged_in
-            active_cm_url         = ADS_CAMPAIGN_MANAGER_US if is_us else ADS_CAMPAIGN_MANAGER
+        async def _sc_stream():
+            if ads_only:
+                return
+            for account in accounts:
+                name        = account["name"]
+                sc_account  = account.get("sc_account_name", name)
+                sc_parent   = account.get("sc_parent")
+                sheet_id    = account["google_sheet_id"]
+                marketplace = account.get("marketplace", "IN").upper()
+                is_us = marketplace == "US"
+                active_sc_page      = sc_us_page      if is_us else sc_page
+                active_sc_logged_in = sc_us_logged_in if is_us else sc_logged_in
 
-            log.info("=" * 60)
-            log.info("Processing: %s  (dates: %s)", name,
-                     ", ".join(d.isoformat() for d in report_dates))
-            log.info("=" * 60)
-            await bot_ctx.send(f"📍 *{name}* — starting...")
+                if not active_sc_logged_in:
+                    log.error("[%s] Skipping SC reports — not logged in to %s SC portal",
+                              name, "US" if is_us else "India")
+                    continue
 
-            account_summary = []
-
-            # ── Seller Central reports ────────────────────────────────────────
-            if not ads_only and active_sc_logged_in:
+                log.info("[SC] %s  (dates: %s)", name,
+                         ", ".join(d.isoformat() for d in report_dates))
+                summary = []
                 try:
                     mcid = await switch_sc_account(
                         active_sc_page, sc_account, sc_parent, name,
@@ -242,27 +239,53 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
                                 "[%s] CONTAMINATION GUARD: SC mcid %s already belongs to '%s' — "
                                 "aborting Sales download for %s", name, mcid, prev_owner, name
                             )
-                            account_summary.append(f"Sales: ❌ contamination guard (mcid matches {prev_owner})")
+                            summary.append(f"Sales: ❌ contamination guard (mcid matches {prev_owner})")
                         else:
                             if mcid != "UNKNOWN":
                                 sc_seen_ids[mcid] = name
+                            need_nav = True
                             for rd in report_dates:
-                                sales_df = await download_sales_report(active_sc_page, name, marketplace=marketplace, target_date=rd)
+                                sales_df = await download_sales_report(
+                                    active_sc_page, name, marketplace=marketplace,
+                                    target_date=rd, navigate=need_nav)
+                                # Reuse the open report page only after a clean pull
+                                need_nav = sales_df is None
                                 rows = upload_dataframe(sales_df, sheet_id, "sales", replace_date=rd)
                                 if rows:
-                                    account_summary.append(f"Sales {rd.isoformat()}: {rows} rows")
+                                    summary.append(f"Sales {rd.isoformat()}: {rows} rows")
                     else:
                         log.error("[%s] Skipping SC reports — account switch failed", name)
-                        account_summary.append("Sales: ❌ switch failed")
+                        summary.append("Sales: ❌ switch failed")
                 except Exception as exc:
                     log.exception("[%s] SC error: %s", name, exc)
-                    account_summary.append(f"Sales: ❌ error")
-            elif not ads_only:
-                log.error("[%s] Skipping SC reports — not logged in to %s SC portal",
-                          name, "US" if is_us else "India")
+                    summary.append("Sales: ❌ error")
 
-            # ── Ads reports ───────────────────────────────────────────────────
-            if not sc_only and active_ads_logged_in:
+                if summary:
+                    await bot_ctx.send(f"🛒 *{name}* — SC\n" + "\n".join(f"  • {s}" for s in summary))
+                else:
+                    await bot_ctx.send(f"⚠️ *{name}* — no SC data uploaded")
+
+        async def _ads_stream():
+            if sc_only:
+                return
+            for account in accounts:
+                name        = account["name"]
+                ads_account = account.get("ads_account_name", name)
+                sheet_id    = account["google_sheet_id"]
+                marketplace = account.get("marketplace", "IN").upper()
+                is_us = marketplace == "US"
+                active_ads_page      = ads_us_page      if is_us else ads_page
+                active_ads_logged_in = ads_us_logged_in if is_us else ads_logged_in
+                active_cm_url        = ADS_CAMPAIGN_MANAGER_US if is_us else ADS_CAMPAIGN_MANAGER
+
+                if not active_ads_logged_in:
+                    log.error("[%s] Skipping Ads reports — not logged in to %s Ads portal",
+                              name, "US" if is_us else "India")
+                    continue
+
+                log.info("[ADS] %s  (dates: %s)", name,
+                         ", ".join(d.isoformat() for d in report_dates))
+                summary = []
                 try:
                     entity_id = await switch_ads_account(
                         active_ads_page, ads_account, name,
@@ -270,7 +293,7 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
                     )
                     if not entity_id:
                         log.error("[%s] Skipping Ads reports — entity switch failed", name)
-                        account_summary.append("Ads: ❌ switch failed")
+                        summary.append("Ads: ❌ switch failed")
                     else:
                         prev_owner = ads_seen_ids.get(entity_id)
                         if prev_owner and prev_owner != name and entity_id != "UNKNOWN":
@@ -278,35 +301,41 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
                                 "[%s] CONTAMINATION GUARD: Ads entityId %s already belongs to '%s' — "
                                 "aborting Ads download for %s", name, entity_id, prev_owner, name
                             )
-                            account_summary.append(f"Ads: ❌ contamination guard (entityId matches {prev_owner})")
+                            summary.append(f"Ads: ❌ contamination guard (entityId matches {prev_owner})")
                         else:
                             if entity_id != "UNKNOWN":
                                 ads_seen_ids[entity_id] = name
 
+                            need_nav = True
                             for rd in report_dates:
-                                campaign_df = await download_campaign_report(active_ads_page, account, name, target_date=rd)
+                                campaign_df = await download_campaign_report(
+                                    active_ads_page, account, name,
+                                    target_date=rd, navigate=need_nav)
+                                need_nav = campaign_df is None
                                 rows = upload_dataframe(campaign_df, sheet_id, "campaigns", replace_date=rd)
                                 if rows:
-                                    account_summary.append(f"Campaigns {rd.isoformat()}: {rows} rows")
+                                    summary.append(f"Campaigns {rd.isoformat()}: {rows} rows")
 
+                            need_nav = True
                             for rd in report_dates:
-                                products_df = await download_advertised_products_report(active_ads_page, account, name, target_date=rd)
+                                products_df = await download_advertised_products_report(
+                                    active_ads_page, account, name,
+                                    target_date=rd, navigate=need_nav)
+                                need_nav = products_df is None
                                 rows = upload_dataframe(products_df, sheet_id, "advertised_products", replace_date=rd)
                                 if rows:
-                                    account_summary.append(f"Products {rd.isoformat()}: {rows} rows")
+                                    summary.append(f"Products {rd.isoformat()}: {rows} rows")
 
                 except Exception as exc:
                     log.exception("[%s] Ads error: %s", name, exc)
-                    account_summary.append("Ads: ❌ error")
-            elif not sc_only:
-                log.error("[%s] Skipping Ads reports — not logged in to %s Ads portal",
-                          name, "US" if is_us else "India")
+                    summary.append("Ads: ❌ error")
 
-            # Send per-account summary to Telegram
-            if account_summary:
-                await bot_ctx.send(f"✅ *{name}*\n" + "\n".join(f"  • {s}" for s in account_summary))
-            else:
-                await bot_ctx.send(f"⚠️ *{name}* — no data uploaded")
+                if summary:
+                    await bot_ctx.send(f"📣 *{name}* — Ads\n" + "\n".join(f"  • {s}" for s in summary))
+                else:
+                    await bot_ctx.send(f"⚠️ *{name}* — no Ads data uploaded")
+
+        await asyncio.gather(_sc_stream(), _ads_stream())
 
         if sc_context:     await sc_context.close()
         if sc_us_context:  await sc_us_context.close()
