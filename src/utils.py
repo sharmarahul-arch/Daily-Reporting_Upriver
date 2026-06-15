@@ -51,11 +51,15 @@ def setup_logging():
 
 async def wait_for_download(page, trigger_fn, timeout: int = 60) -> Optional[Path]:
     """Trigger a download, wait for it, return the saved file path."""
+    import uuid
     DOWNLOADS_DIR.mkdir(exist_ok=True)
     async with page.expect_download(timeout=timeout * 1000) as dl_info:
         await trigger_fn()
     download = await dl_info.value
-    dest = DOWNLOADS_DIR / download.suggested_filename
+    # Unique prefix: accounts run in parallel and Amazon suggests the same
+    # filename (e.g. Campaign_Jun_12_2026.csv) for every account — a shared
+    # name would let one account's file overwrite another's mid-parse.
+    dest = DOWNLOADS_DIR / f"{uuid.uuid4().hex[:8]}_{download.suggested_filename}"
     await download.save_as(dest)
     log.info("Downloaded: %s", dest.name)
     return dest

@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 
 async def run(filter_account: Optional[str] = None, headless: bool = False, sc_only: bool = False,
               ads_only: bool = False, target_date=None, exclude_accounts=None,
-              backfill_days: int = 2):
+              backfill_days: int = 2, parallel: int = 3):
     accounts = load_accounts()
 
     # ── Attribution backfill ──────────────────────────────────────────────
@@ -83,111 +83,71 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
             args=["--no-sandbox"],
         )
 
-        # ── India SC browser context (sellercentral.amazon.in) ───────────────
-        # Skipped entirely when ads_only=True to avoid touching SC sessions
-        sc_context = sc_page = None
-        sc_logged_in = False
+        # ── Phase 1: ensure portal sessions (sequential — may need manual OTP) ──
+        # Each needed portal gets a short-lived bootstrap context: restore
+        # cookies or log in fresh, save cookies to sessions/<portal>.json,
+        # close. The parallel per-account contexts in Phase 2 then seed
+        # themselves from those saved session files.
+        has_in = any(a.get("marketplace", "IN").upper() != "US" for a in accounts)
+        has_us = any(a.get("marketplace", "IN").upper() == "US" for a in accounts)
+        need = {
+            "sc":     (not ads_only) and has_in,
+            "sc_us":  (not ads_only) and has_us,
+            "ads":    (not sc_only) and has_in,
+            "ads_us": (not sc_only) and has_us,
+        }
 
-        if not ads_only:
-            sc_context = await browser.new_context(accept_downloads=True, viewport={"width": 1920, "height": 1080})
-            sc_page    = await sc_context.new_page()
+        async def _ensure_portal_session(portal: str, check_url: str, login_fn) -> bool:
+            ctx = await browser.new_context(accept_downloads=True,
+                                            viewport={"width": 1920, "height": 1080})
+            try:
+                page = await ctx.new_page()
+                ok = await restore_session(ctx, portal)
+                if ok:
+                    try:
+                        await page.goto(check_url, wait_until="domcontentloaded", timeout=15000)
+                        # Only treat a hard sign-in redirect as failure.
+                        # "account-switcher/switcher" means we ARE logged in.
+                        if "ap/signin" in page.url:
+                            ok = False
+                    except Exception:
+                        ok = False
+                if not ok:
+                    clear_session(portal)
+                    ok = await login_fn(page)
+                    if ok:
+                        await save_session(ctx, portal)
+                return ok
+            finally:
+                await ctx.close()
 
-            sc_logged_in = await restore_session(sc_context, "sc")
-            if sc_logged_in:
-                try:
-                    await sc_page.goto(f"{SC_BASE_URL}/gp/homepage.html", wait_until="domcontentloaded", timeout=15000)
-                    # Only treat a hard sign-in redirect as failure.
-                    # "account-switcher/switcher" means we ARE logged in — switch_sc_account handles it.
-                    if "ap/signin" in sc_page.url:
-                        sc_logged_in = False
-                except Exception:
-                    sc_logged_in = False
-
-            if not sc_logged_in:
-                clear_session("sc")
-                sc_logged_in = await login_seller_central(sc_page, email, password, base_url=SC_BASE_URL)
-                if sc_logged_in:
-                    await save_session(sc_context, "sc")
-                else:
-                    await bot_ctx.send(
-                        "⚠️ *SC India login failed* — Sales reports will be skipped.\n"
-                        "Run `python3 main.py --sc-only` (headed) to refresh the session."
-                    )
-
-        # ── US SC browser context (sellercentral.amazon.com) ─────────────────
-        sc_us_context = sc_us_page = None
-        sc_us_logged_in = False
-
-        if not ads_only:
-            sc_us_context = await browser.new_context(accept_downloads=True, viewport={"width": 1920, "height": 1080})
-            sc_us_page    = await sc_us_context.new_page()
-
-            sc_us_logged_in = await restore_session(sc_us_context, "sc_us")
-            if sc_us_logged_in:
-                try:
-                    await sc_us_page.goto(f"{SC_BASE_URL_US}/gp/homepage.html", wait_until="domcontentloaded", timeout=15000)
-                    if "ap/signin" in sc_us_page.url:
-                        sc_us_logged_in = False
-                except Exception:
-                    sc_us_logged_in = False
-
-            if not sc_us_logged_in:
-                clear_session("sc_us")
-                sc_us_logged_in = await login_seller_central(sc_us_page, email, password, base_url=SC_BASE_URL_US)
-                if sc_us_logged_in:
-                    await save_session(sc_us_context, "sc_us")
-                else:
-                    await bot_ctx.send(
-                        "⚠️ *SC US login failed* — US Sales reports will be skipped.\n"
-                        "Run `python3 main.py --sc-only` (headed) to refresh the session."
-                    )
-
-        # ── India Ads browser context (advertising.amazon.in) ────────────────
-        # Skipped entirely when sc_only=True to avoid touching Ads sessions
-        ads_context = ads_page = None
-        ads_logged_in = False
-
-        if not sc_only:
-            ads_context = await browser.new_context(accept_downloads=True, viewport={"width": 1920, "height": 1080})
-            ads_page    = await ads_context.new_page()
-
-            ads_logged_in = await restore_session(ads_context, "ads")
-            if ads_logged_in:
-                try:
-                    await ads_page.goto(ADS_CAMPAIGN_MANAGER, wait_until="domcontentloaded", timeout=15000)
-                    if "ap/signin" in ads_page.url:
-                        ads_logged_in = False
-                except Exception:
-                    ads_logged_in = False
-
-            if not ads_logged_in:
-                clear_session("ads")
-                ads_logged_in = await login_ads(ads_page, email, password, start_url=ADS_CAMPAIGN_MANAGER)
-                if ads_logged_in:
-                    await save_session(ads_context, "ads")
-
-        # ── US Ads browser context (advertising.amazon.com) ──────────────────
-        ads_us_context = ads_us_page = None
-        ads_us_logged_in = False
-
-        if not sc_only:
-            ads_us_context = await browser.new_context(accept_downloads=True, viewport={"width": 1920, "height": 1080})
-            ads_us_page    = await ads_us_context.new_page()
-
-            ads_us_logged_in = await restore_session(ads_us_context, "ads_us")
-            if ads_us_logged_in:
-                try:
-                    await ads_us_page.goto(ADS_CAMPAIGN_MANAGER_US, wait_until="domcontentloaded", timeout=15000)
-                    if "ap/signin" in ads_us_page.url:
-                        ads_us_logged_in = False
-                except Exception:
-                    ads_us_logged_in = False
-
-            if not ads_us_logged_in:
-                clear_session("ads_us")
-                ads_us_logged_in = await login_ads(ads_us_page, email, password, start_url=ADS_CAMPAIGN_MANAGER_US)
-                if ads_us_logged_in:
-                    await save_session(ads_us_context, "ads_us")
+        portal_ok = {p: False for p in need}
+        if need["sc"]:
+            portal_ok["sc"] = await _ensure_portal_session(
+                "sc", f"{SC_BASE_URL}/gp/homepage.html",
+                lambda page: login_seller_central(page, email, password, base_url=SC_BASE_URL))
+            if not portal_ok["sc"]:
+                await bot_ctx.send(
+                    "⚠️ *SC India login failed* — Sales reports will be skipped.\n"
+                    "Run `python3 main.py --sc-only` (headed) to refresh the session."
+                )
+        if need["sc_us"]:
+            portal_ok["sc_us"] = await _ensure_portal_session(
+                "sc_us", f"{SC_BASE_URL_US}/gp/homepage.html",
+                lambda page: login_seller_central(page, email, password, base_url=SC_BASE_URL_US))
+            if not portal_ok["sc_us"]:
+                await bot_ctx.send(
+                    "⚠️ *SC US login failed* — US Sales reports will be skipped.\n"
+                    "Run `python3 main.py --sc-only` (headed) to refresh the session."
+                )
+        if need["ads"]:
+            portal_ok["ads"] = await _ensure_portal_session(
+                "ads", ADS_CAMPAIGN_MANAGER,
+                lambda page: login_ads(page, email, password, start_url=ADS_CAMPAIGN_MANAGER))
+        if need["ads_us"]:
+            portal_ok["ads_us"] = await _ensure_portal_session(
+                "ads_us", ADS_CAMPAIGN_MANAGER_US,
+                lambda page: login_ads(page, email, password, start_url=ADS_CAMPAIGN_MANAGER_US))
 
         # Track merchant/entity IDs across accounts to catch silent switch no-ops.
         # If switching to a new account returns an ID we've already seen for a
@@ -196,151 +156,152 @@ async def run(filter_account: Optional[str] = None, headless: bool = False, sc_o
         sc_seen_ids: dict[str, str] = {}    # mcid -> brand_name that owns it
         ads_seen_ids: dict[str, str] = {}   # entityId -> brand_name that owns it
 
-        # ── Process accounts: SC and Ads run as CONCURRENT streams ───────────
-        # The SC pages and Ads pages live in separate browser contexts that
-        # never share cookies or account-selection state, so the two report
-        # streams can walk the account list independently and in parallel —
-        # the SC timeline hides almost entirely under the longer Ads timeline.
+        # ── Phase 2: process all accounts IN PARALLEL ─────────────────────────
+        # Every account gets its OWN SC context and Ads context, each seeded
+        # from the saved portal cookies. A context holds exactly one account
+        # selection for its whole life, so accounts can run side by side
+        # without racing each other's switcher state. `parallel` caps how
+        # many accounts run at once (each takes up to 2 contexts). Waits stay
+        # generous — while one account waits on a slow table, the others keep
+        # working, so patience no longer costs wall-clock time.
+        sem = asyncio.Semaphore(max(1, parallel))
 
-        async def _sc_stream():
+        async def _new_seeded_context(portal: str):
+            ctx = await browser.new_context(accept_downloads=True,
+                                            viewport={"width": 1920, "height": 1080})
+            await restore_session(ctx, portal)
+            return ctx
+
+        async def _account_sc(account, name, summary):
             if ads_only:
                 return
-            for account in accounts:
-                name        = account["name"]
-                sc_account  = account.get("sc_account_name", name)
-                sc_parent   = account.get("sc_parent")
-                sheet_id    = account["google_sheet_id"]
-                marketplace = account.get("marketplace", "IN").upper()
-                is_us = marketplace == "US"
-                active_sc_page      = sc_us_page      if is_us else sc_page
-                active_sc_logged_in = sc_us_logged_in if is_us else sc_logged_in
-
-                if not active_sc_logged_in:
-                    log.error("[%s] Skipping SC reports — not logged in to %s SC portal",
-                              name, "US" if is_us else "India")
-                    continue
-
-                log.info("[SC] %s  (dates: %s)", name,
-                         ", ".join(d.isoformat() for d in report_dates))
-                summary = []
-                try:
-                    mcid = await switch_sc_account(
-                        active_sc_page, sc_account, sc_parent, name,
-                        marketplace=marketplace,
-                        sc_merchant_id=account.get("sc_merchant_id"),
-                        sc_marketplace_id=account.get("sc_marketplace_id"),
-                        sc_paid_id=account.get("sc_paid_id"),
-                        sc_dc=account.get("sc_dc"),
+            marketplace = account.get("marketplace", "IN").upper()
+            is_us = marketplace == "US"
+            portal = "sc_us" if is_us else "sc"
+            if not portal_ok.get(portal):
+                log.error("[%s] Skipping SC reports — not logged in to %s SC portal",
+                          name, "US" if is_us else "India")
+                return
+            sheet_id   = account["google_sheet_id"]
+            sc_account = account.get("sc_account_name", name)
+            sc_parent  = account.get("sc_parent")
+            ctx = await _new_seeded_context(portal)
+            try:
+                page = await ctx.new_page()
+                mcid = await switch_sc_account(
+                    page, sc_account, sc_parent, name,
+                    marketplace=marketplace,
+                    sc_merchant_id=account.get("sc_merchant_id"),
+                    sc_marketplace_id=account.get("sc_marketplace_id"),
+                    sc_paid_id=account.get("sc_paid_id"),
+                    sc_dc=account.get("sc_dc"),
+                )
+                if not mcid:
+                    log.error("[%s] Skipping SC reports — account switch failed", name)
+                    summary.append("Sales: ❌ switch failed")
+                    return
+                prev_owner = sc_seen_ids.get(mcid)
+                if prev_owner and prev_owner != name and mcid != "UNKNOWN":
+                    log.error(
+                        "[%s] CONTAMINATION GUARD: SC mcid %s already belongs to '%s' — "
+                        "aborting Sales download for %s", name, mcid, prev_owner, name
                     )
-                    if mcid:
-                        prev_owner = sc_seen_ids.get(mcid)
-                        if prev_owner and prev_owner != name and mcid != "UNKNOWN":
-                            log.error(
-                                "[%s] CONTAMINATION GUARD: SC mcid %s already belongs to '%s' — "
-                                "aborting Sales download for %s", name, mcid, prev_owner, name
-                            )
-                            summary.append(f"Sales: ❌ contamination guard (mcid matches {prev_owner})")
-                        else:
-                            if mcid != "UNKNOWN":
-                                sc_seen_ids[mcid] = name
-                            need_nav = True
-                            for rd in report_dates:
-                                sales_df = await download_sales_report(
-                                    active_sc_page, name, marketplace=marketplace,
-                                    target_date=rd, navigate=need_nav)
-                                # Reuse the open report page only after a clean pull
-                                need_nav = sales_df is None
-                                rows = upload_dataframe(sales_df, sheet_id, "sales", replace_date=rd)
-                                if rows:
-                                    summary.append(f"Sales {rd.isoformat()}: {rows} rows")
-                    else:
-                        log.error("[%s] Skipping SC reports — account switch failed", name)
-                        summary.append("Sales: ❌ switch failed")
-                except Exception as exc:
-                    log.exception("[%s] SC error: %s", name, exc)
-                    summary.append("Sales: ❌ error")
+                    summary.append(f"Sales: ❌ contamination guard (mcid matches {prev_owner})")
+                    return
+                if mcid != "UNKNOWN":
+                    sc_seen_ids[mcid] = name
+                need_nav = True
+                for rd in report_dates:
+                    sales_df = await download_sales_report(
+                        page, name, marketplace=marketplace,
+                        target_date=rd, navigate=need_nav)
+                    # Reuse the open report page only after a clean pull
+                    need_nav = sales_df is None
+                    rows = upload_dataframe(sales_df, sheet_id, "sales", replace_date=rd)
+                    if rows:
+                        summary.append(f"Sales {rd.isoformat()}: {rows} rows")
+            except Exception as exc:
+                log.exception("[%s] SC error: %s", name, exc)
+                summary.append("Sales: ❌ error")
+            finally:
+                await ctx.close()
 
-                if summary:
-                    await bot_ctx.send(f"🛒 *{name}* — SC\n" + "\n".join(f"  • {s}" for s in summary))
-                else:
-                    await bot_ctx.send(f"⚠️ *{name}* — no SC data uploaded")
-
-        async def _ads_stream():
+        async def _account_ads(account, name, summary):
             if sc_only:
                 return
-            for account in accounts:
-                name        = account["name"]
-                ads_account = account.get("ads_account_name", name)
-                sheet_id    = account["google_sheet_id"]
-                marketplace = account.get("marketplace", "IN").upper()
-                is_us = marketplace == "US"
-                active_ads_page      = ads_us_page      if is_us else ads_page
-                active_ads_logged_in = ads_us_logged_in if is_us else ads_logged_in
-                active_cm_url        = ADS_CAMPAIGN_MANAGER_US if is_us else ADS_CAMPAIGN_MANAGER
-
-                if not active_ads_logged_in:
-                    log.error("[%s] Skipping Ads reports — not logged in to %s Ads portal",
-                              name, "US" if is_us else "India")
-                    continue
-
-                log.info("[ADS] %s  (dates: %s)", name,
-                         ", ".join(d.isoformat() for d in report_dates))
-                summary = []
-                try:
-                    entity_id = await switch_ads_account(
-                        active_ads_page, ads_account, name,
-                        campaign_manager_url=active_cm_url,
+            marketplace = account.get("marketplace", "IN").upper()
+            is_us = marketplace == "US"
+            portal = "ads_us" if is_us else "ads"
+            if not portal_ok.get(portal):
+                log.error("[%s] Skipping Ads reports — not logged in to %s Ads portal",
+                          name, "US" if is_us else "India")
+                return
+            sheet_id    = account["google_sheet_id"]
+            ads_account = account.get("ads_account_name", name)
+            cm_url      = ADS_CAMPAIGN_MANAGER_US if is_us else ADS_CAMPAIGN_MANAGER
+            ctx = await _new_seeded_context(portal)
+            try:
+                page = await ctx.new_page()
+                entity_id = await switch_ads_account(
+                    page, ads_account, name,
+                    campaign_manager_url=cm_url,
+                )
+                if not entity_id:
+                    log.error("[%s] Skipping Ads reports — entity switch failed", name)
+                    summary.append("Ads: ❌ switch failed")
+                    return
+                prev_owner = ads_seen_ids.get(entity_id)
+                if prev_owner and prev_owner != name and entity_id != "UNKNOWN":
+                    log.error(
+                        "[%s] CONTAMINATION GUARD: Ads entityId %s already belongs to '%s' — "
+                        "aborting Ads download for %s", name, entity_id, prev_owner, name
                     )
-                    if not entity_id:
-                        log.error("[%s] Skipping Ads reports — entity switch failed", name)
-                        summary.append("Ads: ❌ switch failed")
-                    else:
-                        prev_owner = ads_seen_ids.get(entity_id)
-                        if prev_owner and prev_owner != name and entity_id != "UNKNOWN":
-                            log.error(
-                                "[%s] CONTAMINATION GUARD: Ads entityId %s already belongs to '%s' — "
-                                "aborting Ads download for %s", name, entity_id, prev_owner, name
-                            )
-                            summary.append(f"Ads: ❌ contamination guard (entityId matches {prev_owner})")
-                        else:
-                            if entity_id != "UNKNOWN":
-                                ads_seen_ids[entity_id] = name
+                    summary.append(f"Ads: ❌ contamination guard (entityId matches {prev_owner})")
+                    return
+                if entity_id != "UNKNOWN":
+                    ads_seen_ids[entity_id] = name
 
-                            need_nav = True
-                            for rd in report_dates:
-                                campaign_df = await download_campaign_report(
-                                    active_ads_page, account, name,
-                                    target_date=rd, navigate=need_nav)
-                                need_nav = campaign_df is None
-                                rows = upload_dataframe(campaign_df, sheet_id, "campaigns", replace_date=rd)
-                                if rows:
-                                    summary.append(f"Campaigns {rd.isoformat()}: {rows} rows")
+                need_nav = True
+                for rd in report_dates:
+                    campaign_df = await download_campaign_report(
+                        page, account, name, target_date=rd, navigate=need_nav)
+                    need_nav = campaign_df is None
+                    rows = upload_dataframe(campaign_df, sheet_id, "campaigns", replace_date=rd)
+                    if rows:
+                        summary.append(f"Campaigns {rd.isoformat()}: {rows} rows")
 
-                            need_nav = True
-                            for rd in report_dates:
-                                products_df = await download_advertised_products_report(
-                                    active_ads_page, account, name,
-                                    target_date=rd, navigate=need_nav)
-                                need_nav = products_df is None
-                                rows = upload_dataframe(products_df, sheet_id, "advertised_products", replace_date=rd)
-                                if rows:
-                                    summary.append(f"Products {rd.isoformat()}: {rows} rows")
+                need_nav = True
+                for rd in report_dates:
+                    products_df = await download_advertised_products_report(
+                        page, account, name, target_date=rd, navigate=need_nav)
+                    need_nav = products_df is None
+                    rows = upload_dataframe(products_df, sheet_id, "advertised_products", replace_date=rd)
+                    if rows:
+                        summary.append(f"Products {rd.isoformat()}: {rows} rows")
+            except Exception as exc:
+                log.exception("[%s] Ads error: %s", name, exc)
+                summary.append("Ads: ❌ error")
+            finally:
+                await ctx.close()
 
-                except Exception as exc:
-                    log.exception("[%s] Ads error: %s", name, exc)
-                    summary.append("Ads: ❌ error")
-
+        async def _process_account(account):
+            name = account["name"]
+            async with sem:
+                log.info("=" * 60)
+                log.info("Processing: %s  (dates: %s)", name,
+                         ", ".join(d.isoformat() for d in report_dates))
+                log.info("=" * 60)
+                summary = []
+                # SC and Ads for one account use separate contexts — run together
+                await asyncio.gather(_account_sc(account, name, summary),
+                                     _account_ads(account, name, summary))
                 if summary:
-                    await bot_ctx.send(f"📣 *{name}* — Ads\n" + "\n".join(f"  • {s}" for s in summary))
+                    await bot_ctx.send(f"✅ *{name}*\n" + "\n".join(f"  • {s}" for s in summary))
                 else:
-                    await bot_ctx.send(f"⚠️ *{name}* — no Ads data uploaded")
+                    await bot_ctx.send(f"⚠️ *{name}* — no data uploaded")
 
-        await asyncio.gather(_sc_stream(), _ads_stream())
+        await asyncio.gather(*(_process_account(a) for a in accounts))
 
-        if sc_context:     await sc_context.close()
-        if sc_us_context:  await sc_us_context.close()
-        if ads_context:    await ads_context.close()
-        if ads_us_context: await ads_us_context.close()
         await browser.close()
 
     clean_downloads()
@@ -369,6 +330,10 @@ def main():
                         help="On a default (yesterday) run, also re-pull and replace this many "
                              "days before yesterday to absorb Amazon attribution updates "
                              "(default: 2, use 0 to disable)")
+    parser.add_argument("--parallel", type=int, default=3,
+                        help="How many accounts to process at the same time, each in its own "
+                             "browser context (default: 3; raise carefully — each account "
+                             "opens up to 2 browser windows)")
     args = parser.parse_args()
 
     target_date = None
@@ -408,6 +373,7 @@ def main():
         target_date=target_date,
         exclude_accounts=exclude_accounts,
         backfill_days=max(0, args.backfill_days),
+        parallel=max(1, args.parallel),
     ))
 
 

@@ -1074,7 +1074,7 @@ _TABLE_ROWS_JS = """
 """
 
 
-async def _wait_for_campaign_table(page: Page, account_name: str, timeout_s: int = 30) -> bool:
+async def _wait_for_campaign_table(page: Page, account_name: str, timeout_s: int = 45) -> bool:
     """
     Poll for the campaign/products table to actually render its rows before we
     read/sort/export it. The Ads SPA reloads the table after a date change and
@@ -1084,8 +1084,9 @@ async def _wait_for_campaign_table(page: Page, account_name: str, timeout_s: int
     # Pagination text ("1-300 of 489") is the authoritative signal, but small
     # accounts whose results fit on one page never show it — those used to
     # burn the full timeout despite a perfectly rendered table. Fallback:
-    # a visible-row count that is stable across two consecutive polls, or an
-    # explicit empty state.
+    # a visible-row count that stays identical for THREE consecutive polls
+    # (a still-loading grid keeps changing), or an explicit empty state.
+    stable = 0
     prev_sig = None
     for _ in range(timeout_s):
         pag = await page.evaluate(_PAG_TEXT_JS)
@@ -1096,8 +1097,12 @@ async def _wait_for_campaign_table(page: Page, account_name: str, timeout_s: int
             log.info("[%s] Table shows an empty state — treating as rendered", account_name)
             return True
         if sig and sig == prev_sig:
-            log.info("[%s] Table rendered (%s, no pagination shown)", account_name, sig)
-            return True
+            stable += 1
+            if stable >= 2:   # 3 consecutive identical readings
+                log.info("[%s] Table rendered (%s, no pagination shown)", account_name, sig)
+                return True
+        else:
+            stable = 0
         prev_sig = sig
         await page.wait_for_timeout(1000)
     return False
@@ -1298,7 +1303,7 @@ async def download_campaign_report(page: Page, account: dict, account_name: str,
                 except Exception:
                     pass
                 await _set_dashboard_date_yesterday(page, account_name, report_date)
-                if await _wait_for_campaign_table(page, account_name, timeout_s=15):
+                if await _wait_for_campaign_table(page, account_name):
                     log.info("[%s] Campaign table rendered after retry %d", account_name, _retry + 1)
                     break
 
