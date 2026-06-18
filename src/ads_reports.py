@@ -649,6 +649,50 @@ async def _click_export_and_download(page: Page, account_name: str, label: str) 
             pass
 
     if dl_el is None:
+        # Empty dropdown — reload the page and retry the export once.
+        # Amazon occasionally renders a blank Export dropdown; a page refresh fixes it.
+        log.info("[%s] Empty Export dropdown for %s — reloading page and retrying", account_name, label)
+        try:
+            await page.reload(wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(3000)
+            await _wait_for_campaign_table(page, account_name)
+            export_btn2 = await page.evaluate_handle("""
+                () => {
+                    const isVisible = el => {
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 &&
+                               s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    return Array.from(document.querySelectorAll('button, a, [role="button"]')).find(e => {
+                        const t = (e.innerText || e.textContent || e.getAttribute('aria-label') || '')
+                                   .trim().toLowerCase();
+                        return isVisible(e) && (
+                            t === 'export' || t === 'download' || t === 'bulk download' ||
+                            (t.includes('export') && t.length < 25)
+                        );
+                    }) || null;
+                }
+            """)
+            btn2 = export_btn2.as_element()
+            if btn2:
+                try:
+                    path = await wait_for_download(page, lambda: btn2.click(force=True), timeout=3)
+                    log.info("[%s] Export button triggered direct download for %s (post-reload)", account_name, label)
+                    return path
+                except Exception:
+                    pass
+                await page.wait_for_timeout(3000)
+                try:
+                    dl_locator3 = page.locator(DROPDOWN_SELECTORS).first
+                    await dl_locator3.wait_for(state="visible", timeout=6000)
+                    dl_el = dl_locator3
+                except Exception:
+                    pass
+        except Exception as reload_exc:
+            log.warning("[%s] Page reload failed for %s: %s", account_name, label, reload_exc)
+
+    if dl_el is None:
         visible_items = await page.evaluate("""
             () => {
                 const isVisible = el => {
