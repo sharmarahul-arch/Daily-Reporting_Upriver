@@ -177,18 +177,30 @@ def upload_dataframe(df: pd.DataFrame, sheet_id: str, report_key: str, account_n
             log.warning("Could not delete old rows for %s in '%s': %s — appending anyway",
                         replace_date.isoformat(), tab_name, exc)
 
-    # Write headers if they are not already in row 1
+    # Write headers if they are not already in row 1.
+    # Sheets pads every row with trailing '' to match the widest row, so strip
+    # those before comparing — otherwise a column-count change causes a new
+    # header row to be inserted on every run, stacking up duplicates.
     existing = ws.get_all_values()
     expected_headers = df.columns.tolist()
-    has_headers = existing and existing[0] == expected_headers
-    if not has_headers:
-        if existing:
-            # Sheet has data but wrong/missing headers — insert header row at top
-            ws.insert_row(expected_headers, index=1, value_input_option="USER_ENTERED")
-            log.info("Inserted header row into '%s' tab", tab_name)
-        else:
+    existing_row1 = [c.strip() for c in existing[0]] if existing else []
+    while existing_row1 and existing_row1[-1] == "":
+        existing_row1.pop()
+    row1_is_header = existing_row1 and existing_row1[0] == expected_headers[0]
+    has_correct_headers = existing_row1 == expected_headers
+    if not has_correct_headers:
+        if not existing:
             ws.append_row(expected_headers, value_input_option="USER_ENTERED")
             log.info("Wrote header row to '%s' tab", tab_name)
+        elif row1_is_header:
+            # Row 1 is already a header but columns changed — update in place
+            # instead of inserting (which would stack duplicate header rows).
+            ws.update("A1", [expected_headers], value_input_option="USER_ENTERED")
+            log.info("Updated header row in '%s' tab", tab_name)
+        else:
+            # Row 1 is data (no header at all) — insert one at the top
+            ws.insert_row(expected_headers, index=1, value_input_option="USER_ENTERED")
+            log.info("Inserted header row into '%s' tab", tab_name)
 
     # Append data rows in batches to avoid API limits
     rows = df.fillna("").astype(str).values.tolist()
