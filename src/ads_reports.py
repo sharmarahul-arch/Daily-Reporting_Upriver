@@ -18,6 +18,65 @@ from src.config import ADS_BASE_URL, ADS_CAMPAIGN_MANAGER, ADS_BASE_URL_US, ADS_
 
 log = logging.getLogger(__name__)
 
+# ── Column filters ─────────────────────────────────────────────────────────────
+# Only these columns are written to Google Sheets. Columns not present in a
+# particular CSV (e.g. a marketplace that doesn't export a field) are skipped.
+
+_CAMPAIGN_COLUMNS = [
+    # (csv column name,              sheet column name)
+    ("Account",                      "Account"),
+    ("Report Date",                  "Report Date"),
+    ("Campaign name",                "Campaign Name"),
+    ("Type",                         "Type"),
+    ("Targeting",                    "Targeting"),
+    ("Portfolio name",               "Portfolio Name"),
+    ("Campaign budget amount",       "Campaign Budget Amount"),
+    ("Cost type",                    "Cost Type"),
+    ("Impressions",                  "Impressions"),
+    ("Clicks",                       "Clicks"),
+    ("Total cost",                   "Total Cost"),
+    ("Purchases",                    "Purchases"),
+    ("Sales",                        "Sales"),
+]
+
+_PRODUCTS_COLUMNS = [
+    ("Account",                      "Account"),
+    ("Report Date",                  "Report Date"),
+    ("Products",                     "Products"),
+    ("Impressions",                  "Impressions"),
+    ("Clicks",                       "Clicks"),
+    # Spend and Sales carry a currency suffix (INR/USD) — matched by prefix below
+    ("Orders",                       "Orders"),
+]
+
+
+def _apply_column_filter(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """Keep and rename only the listed columns; skip any not present in df."""
+    keep, rename = [], {}
+    for src, dst in cols:
+        if src in df.columns:
+            keep.append(src)
+            if src != dst:
+                rename[src] = dst
+    return df[keep].rename(columns=rename)
+
+
+def _apply_products_filter(df_orig: pd.DataFrame) -> pd.DataFrame:
+    """Select the fixed products columns, handling currency-suffixed Spend/Sales."""
+    base = _apply_column_filter(df_orig, _PRODUCTS_COLUMNS)
+    # Spend(INR) / Spend(USD) → Spend
+    spend_col = next((c for c in df_orig.columns if c.startswith("Spend")), None)
+    if spend_col:
+        base.insert(base.columns.get_loc("Orders"), "Spend", df_orig[spend_col])
+    # Sales(INR) / Sales(USD) → Sales  (exclude NTB sales)
+    sales_col = next((c for c in df_orig.columns
+                      if c.startswith("Sales") and "NTB" not in c and "new to brand" not in c.lower()), None)
+    if sales_col:
+        base["Sales"] = df_orig[sales_col]
+    # Final column order
+    order = ["Account", "Report Date", "Products", "Impressions", "Clicks", "Spend", "Orders", "Sales"]
+    return base[[c for c in order if c in base.columns]]
+
 
 def _ads_urls(account: dict) -> tuple[str, str]:
     """Return (base_url, campaign_manager_url) for this account's marketplace."""
@@ -1361,6 +1420,7 @@ async def download_campaign_report(page: Page, account: dict, account_name: str,
             combined = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
             combined.insert(0, "Account", account_name)
             combined.insert(1, "Report Date", report_date.isoformat())
+            combined = _apply_column_filter(combined, _CAMPAIGN_COLUMNS)
             log.info("[%s] Campaign rows (all pages): %d", account_name, len(combined))
             return combined
 
@@ -1401,6 +1461,7 @@ async def download_advertised_products_report(page: Page, account: dict, account
                 combined = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
                 combined.insert(0, "Account", account_name)
                 combined.insert(1, "Report Date", report_date.isoformat())
+                combined = _apply_products_filter(combined)
                 log.info("[%s] Advertised Products rows (all pages): %d", account_name, len(combined))
                 return combined
             log.warning("[%s] Products reuse-page export empty — falling back to full navigation",
@@ -1507,6 +1568,7 @@ async def download_advertised_products_report(page: Page, account: dict, account
             combined = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
             combined.insert(0, "Account", account_name)
             combined.insert(1, "Report Date", report_date.isoformat())
+            combined = _apply_products_filter(combined)
             log.info("[%s] Advertised Products rows (all pages): %d", account_name, len(combined))
             return combined
 

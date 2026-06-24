@@ -318,11 +318,33 @@ async def _set_date_to_yesterday(page: Page, account_name: str, report_date: "da
         log.warning("[%s] Error setting date filter: %s", account_name, exc)
 
 
+_SALES_COLUMNS = [
+    # (csv column name,           sheet column name)
+    ("Account",                   "Account"),
+    ("Report Date",               "Report Date"),
+    ("(Parent) ASIN",             "Parent ASIN"),
+    ("(Child) ASIN",              "Child ASIN"),
+    ("Title",                     "Title"),
+    ("Sessions - Total",          "Session Total"),
+    ("Page Views - Total",        "Page Views Total"),
+    ("Units Ordered",             "Units Ordered"),
+    ("Ordered Product Sales",     "Ordered Product Sales"),
+]
+
+
 def _parse_sales_csv(path: Path, account_name: str, report_date: "date" = None) -> pd.DataFrame:
     df = pd.read_csv(path, encoding="utf-8-sig")
     df.columns = df.columns.str.strip()
     df.insert(0, "Account", account_name)
     df.insert(1, "Report Date", report_date.isoformat() if report_date else yesterday())
+    # Keep only the required columns, renamed to sheet-friendly names
+    keep, rename = [], {}
+    for src, dst in _SALES_COLUMNS:
+        if src in df.columns:
+            keep.append(src)
+            if src != dst:
+                rename[src] = dst
+    df = df[keep].rename(columns=rename)
     log.info("[%s] Sales rows: %d", account_name, len(df))
     return df
 

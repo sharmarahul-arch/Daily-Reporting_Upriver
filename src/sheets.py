@@ -193,10 +193,13 @@ def upload_dataframe(df: pd.DataFrame, sheet_id: str, report_key: str, account_n
             ws.append_row(expected_headers, value_input_option="USER_ENTERED")
             log.info("Wrote header row to '%s' tab", tab_name)
         elif row1_is_header:
-            # Row 1 is already a header but columns changed — update in place
-            # instead of inserting (which would stack duplicate header rows).
-            ws.update("A1", [expected_headers], value_input_option="USER_ENTERED")
-            log.info("Updated header row in '%s' tab", tab_name)
+            # Row 1 is already a header but columns changed — replace it cleanly
+            # by deleting and re-inserting so leftover cells beyond the new width
+            # don't survive (ws.update only writes the specified range, leaving
+            # old column names in cells past the new header length).
+            ws.delete_rows(1)
+            ws.insert_row(expected_headers, index=1, value_input_option="USER_ENTERED")
+            log.info("Replaced header row in '%s' tab", tab_name)
         else:
             # Row 1 is data (no header at all) — insert one at the top
             ws.insert_row(expected_headers, index=1, value_input_option="USER_ENTERED")
